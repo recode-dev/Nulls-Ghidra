@@ -1,0 +1,138 @@
+name: decompile
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: total seconds for analyze + dump
+        default: '18000'
+      url:
+        description: ipa url override
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/decompile.yml'
+      - 'tools/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decompile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      ver: ${{ steps.r.outputs.VER }}
+      size: ${{ steps.g.outputs.BINSIZE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: r
+        env:
+          BINARY_URL: ${{ inputs.url }}
+          RESOLVE_ONLY: '1'
+        run: bash tools/fetch.sh
+
+      - uses: actions/cache@v4
+        with:
+          path: ipa_cache
+          key: ipa-${{ steps.r.outputs.VER }}
+
+      - id: g
+        env:
+          BINARY_URL: ${{ inputs.url }}
+        run: bash tools/fetch.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin
+          path: brawl_bin
+          retention-days: 30
+
+  dump:
+    needs: fetch
+    runs-on: macos-14
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: bash tools/r2setup.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: bin
+
+      - run: |
+          set -euo pipefail
+          BIN=$(find bin -type f | head -1)
+          test -s "$BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          file "$BIN"
+
+      - uses: actions/cache/restore@v4
+        id: p
+        with:
+          path: r2proj
+          key: r2proj-${{ env.R2V }}-${{ needs.fetch.outputs.ver }}-${{ needs.fetch.outputs.size }}
+
+      - if: steps.p.outputs.cache-hit != 'true'
+        env:
+          PHASE: analyze
+          BUDGET: ${{ inputs.seconds || '18000' }}
+        run: bash tools/decomp.sh
+
+      - uses: actions/cache/save@v4
+        if: steps.p.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          path: r2proj
+          key: r2proj-${{ env.R2V }}-${{ needs.fetch.outputs.ver }}-${{ needs.fetch.outputs.size }}
+
+      - env:
+          BUDGET: ${{ inputs.seconds || '18000' }}
+        run: bash tools/decomp.sh
+
+      - run: |
+          python3 tools/split.py \
+            --code decompiled.c \
+            --funcs functions.json \
+            --engine engine.txt \
+            --out decompiled \
+            --ver "${{ needs.fetch.outputs.ver }}"
+
+      - run: |
+          set -euo pipefail
+          N=$(find decompiled/src -name '0x*.c' | wc -l | tr -d ' ')
+          echo "funcs $N"
+          test "$N" -gt 0
+
+      - if: always()
+        run: |
+          {
+            echo "| key | value |"
+            echo "|---|---|"
+            sed 's/^/| /; s/=/ | /; s/$/ |/' engine.txt 2>/dev/null
+            echo "| funcs | $(find decompiled/src -name '0x*.c' 2>/dev/null | wc -l | tr -d ' ') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: decompiled-${{ needs.fetch.outputs.ver }}
+          path: |
+            decompiled/
+            decompiled.c
+            engine.txt
+            r2.log
+            analyze.log
+            functions.json
+            renames.r2
+            pat_out/
+          retention-days: 30
+          if-no-files-found: warn
