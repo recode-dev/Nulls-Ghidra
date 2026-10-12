@@ -1,0 +1,248 @@
+name: Decompile
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_budget:
+        description: 'Сколько секунд всего отдать на декомпиляцию (job ограничен 6 часами)'
+        type: string
+        default: '18000'
+      binary_url:
+        description: 'Прямая ссылка на .ipa (пусто = взять последнюю с dnull.xyz/latest_bs_i)'
+        type: string
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/decompile_2.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  R2_VERSION: '6.2.4'
+
+jobs:
+  binary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      ver: ${{ steps.resolve.outputs.VER }}
+      url: ${{ steps.resolve.outputs.URL }}
+    steps:
+      - name: Install helper tools
+        run: |
+          command -v file  >/dev/null 2>&1 || sudo apt-get install -y -qq file
+          command -v unzip >/dev/null 2>&1 || sudo apt-get install -y -qq unzip
+
+      - name: Resolve ipa URL
+        id: resolve
+        env:
+          OVERRIDE_URL: ${{ inputs.binary_url }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE_URL:-}" ]; then
+            LOC="$OVERRIDE_URL"
+          else
+            LOC=$(curl -sIL -A "Mozilla/5.0" "https://dnull.xyz/latest_bs_i" \
+              | grep -i "^location:" | tail -1 | awk '{print $2}' | tr -d '\r\n')
+          fi
+          test -n "$LOC"
+          echo "URL=$LOC" >> "$GITHUB_OUTPUT"
+          VER=$(basename "$LOC" | sed -E 's/nb_([0-9.]+)_.*/\1/')
+          [ -n "$VER" ] || VER=unknown
+          echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "resolved: $LOC (version $VER)"
+
+      - uses: actions/cache@v4
+        id: cache-ipa
+        with:
+          path: ipa_cache
+          key: ipa-nulls-brawl-${{ steps.resolve.outputs.VER }}
+          restore-keys: |
+            ipa-nulls-brawl-
+
+      - name: Download ipa
+        if: steps.cache-ipa.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ipa_cache
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            --max-time 900 -A "Mozilla/5.0" \
+            -o ipa_cache/bs.ipa "${{ steps.resolve.outputs.URL }}"
+          test -s ipa_cache/bs.ipa
+          file ipa_cache/bs.ipa
+
+      - name: Extract Mach-O executable
+        run: |
+          set -euo pipefail
+          rm -rf extract
+          mkdir -p extract
+          unzip -oq ipa_cache/bs.ipa -d extract
+          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          test -n "$APP_DIR"
+          echo "APP_DIR=$APP_DIR"
+
+          PLIST="$APP_DIR/Info.plist"
+          test -f "$PLIST" || { echo "Info.plist missing"; ls -la "$APP_DIR"; exit 1; }
+
+          EXEC_NAME=$(python3 -c "import plistlib,sys; print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable',''))" "$PLIST")
+          echo "CFBundleExecutable=$EXEC_NAME"
+
+          BIN="$APP_DIR/$EXEC_NAME"
+          if [ ! -f "$BIN" ]; then
+            echo "not found at $BIN, scanning .app root"
+            BIN=""
+            for f in "$APP_DIR"/*; do
+              [ -f "$f" ] || continue
+              case "$f" in
+                *.dylib|*.png|*.jpg|*.jpeg|*.plist|*.car|*.ttf|*.otf|*.json|*.xml|*.txt|*.html) continue ;;
+              esac
+              if file "$f" | grep -qiE "Mach-O.*executable"; then
+                BIN="$f"
+                break
+              fi
+            done
+          fi
+          test -n "$BIN" || { echo "no Mach-O executable found"; ls -la "$APP_DIR"; exit 1; }
+          test -f "$BIN"
+
+          file "$BIN"
+          file "$BIN" | grep -qiE "Mach-O.*executable" || { echo "wrong file type"; exit 1; }
+
+          cp "$BIN" /tmp/brawl_bin
+          ls -la /tmp/brawl_bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nulls-brawl-bin
+          path: /tmp/brawl_bin
+          retention-days: 30
+
+  decompile:
+    needs: binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nulls-brawl-bin
+          path: bin
+
+      - name: Проверить бинарь
+        run: |
+          set -euo pipefail
+          ls -la bin/
+          BIN="$(find bin -maxdepth 2 -type f | head -1)"
+          test -n "$BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          file "$BIN"
+          stat -c '%s bytes' "$BIN"
+
+      - name: Установить radare2 и r2ghidra
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq file unzip
+          curl -fL --retry 5 --retry-delay 5 -o /tmp/r2.deb \
+            "https://github.com/radareorg/radare2/releases/download/${R2_VERSION}/radare2_${R2_VERSION}_amd64.deb"
+          sudo apt-get install -y /tmp/r2.deb
+          r2 -v | head -2
+
+          curl -fL --retry 5 --retry-delay 5 -o /tmp/r2ghidra.zip \
+            "https://github.com/radareorg/r2ghidra/releases/download/${R2_VERSION}/r2ghidra-${R2_VERSION}-linux-x86-64.zip"
+          mkdir -p /tmp/r2ghidra
+          unzip -q /tmp/r2ghidra.zip -d /tmp/r2ghidra
+          PLUGDIR="$(r2 -HR2_USER_PLUGINS)"
+          mkdir -p "$PLUGDIR"
+          cp -R /tmp/r2ghidra/plugins/. "$PLUGDIR/"
+          echo "plugins: $(ls "$PLUGDIR")"
+
+          r2 -2 -q -c 'pdg?' "$BIN" 2>&1 | head -3 || true
+
+      - name: Декомпилировать
+        env:
+          DECOMPILE_SECONDS: ${{ inputs.seconds_budget || '18000' }}
+        run: |
+          set -uo pipefail
+          BUDGET="${DECOMPILE_SECONDS:-18000}"
+          MAIN=$((BUDGET * 4 / 5))
+          FALLBACK=$((BUDGET - MAIN))
+
+          rm -f decompiled.c r2.log
+          : > r2.log
+
+          echo "== r2ghidra: pdg по всем функциям (до ${MAIN}s) =="
+          set +e
+          timeout -s INT -k 30 "$MAIN" r2 -2 -q -e scr.color=0 \
+            -c 'aaa' -c 'afl' -c 'pdg @@f' "$BIN" > decompiled.c 2> r2.log
+          echo "rc=$?"
+          set -e
+          BODIES=$(grep -c '^{$' decompiled.c 2>/dev/null || true)
+          echo "после pdg: $(stat -c%s decompiled.c 2>/dev/null || echo 0) байт, тел функций: ${BODIES:-0}"
+
+          if [ "${BODIES:-0}" -lt 5 ]; then
+            echo "::warning::r2ghidra (pdg) не отдал ни одной функции — декомпилирую встроенным декомпилятором r2 (pdc)"
+            set +e
+            timeout -s INT -k 30 "$FALLBACK" r2 -2 -q -e scr.color=0 \
+              -c 'aaa' -c 'afl' -c 'pdc @@f' "$BIN" > decompiled.c 2>> r2.log
+            echo "rc=$?"
+            set -e
+            echo "pdc" > engine.txt
+          else
+            echo "pdg" > engine.txt
+          fi
+
+          echo "engine: $(cat engine.txt)"
+          ls -la decompiled.c
+          echo "строк: $(wc -l < decompiled.c)"
+
+      - name: Проверить результат
+        run: |
+          set -euo pipefail
+          SIZE=$(stat -c%s decompiled.c)
+          BODIES=$(grep -cE '\{$' decompiled.c || true)
+          echo "decompiled.c: $SIZE байт, блоков кода: ${BODIES:-0}, движок: $(cat engine.txt 2>/dev/null || echo '?')"
+          if [ "$SIZE" -lt 4096 ] || [ "${BODIES:-0}" -lt 5 ]; then
+            echo "::error::декомпиляция ничего не дала — смотри r2.log"
+            tail -40 r2.log || true
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          set +e
+          S="$GITHUB_STEP_SUMMARY"
+          ENGINE="$(cat engine.txt 2>/dev/null || echo '?')"
+          NFUNCS=$(grep -cE '^0x[0-9a-f]+ ' decompiled.c 2>/dev/null || true)
+          {
+            echo "### Декомпиляция Null's Brawl"
+            echo ""
+            echo "| что | значение |"
+            echo "|---|---|"
+            echo "| версия бинаря | \`${{ needs.binary.outputs.ver }}\` |"
+            echo "| размер бинаря | $(du -h bin/* 2>/dev/null | head -1 | cut -f1) |"
+            echo "| бюджет | ${{ inputs.seconds_budget || '18000' }} с |"
+            echo "| движок | $ENGINE |"
+            echo "| функций в бинаре | ${NFUNCS:-0} |"
+            echo "| размер кода | $(du -h decompiled.c 2>/dev/null | cut -f1) |"
+            echo "| строк кода | $(wc -l < decompiled.c 2>/dev/null || echo 0) |"
+            echo ""
+            echo "r2 + r2ghidra ${{ env.R2_VERSION }}; \`pdg\` — декомпилятор Ghidra, \`pdc\` — встроенный в r2 запасной вариант."
+          } >> "$S"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: decompiled-nulls-brawl-${{ needs.binary.outputs.ver }}
+          path: |
+            decompiled.c
+            engine.txt
+            r2.log
+          retention-days: 30
+          if-no-files-found: warn
