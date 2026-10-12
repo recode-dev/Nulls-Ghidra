@@ -1,0 +1,163 @@
+name: Decompile
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_budget:
+        description: 'Секунд на анализ и декомпиляцию вместе (потолок job — 6 часов)'
+        type: string
+        default: '18000'
+      binary_url:
+        description: 'Прямая ссылка на .ipa (пусто = последняя с dnull.xyz/latest_bs_i)'
+        type: string
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/decompile_8.yml'
+      - 'tools/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decompile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  binary:
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      ver: ${{ steps.resolve.outputs.VER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Узнать версию бинаря
+        id: resolve
+        env:
+          BINARY_URL: ${{ inputs.binary_url }}
+        run: RESOLVE_ONLY=1 bash tools/fetch_binary.sh
+
+      - uses: actions/cache@v4
+        id: cache-ipa
+        with:
+          path: ipa_cache
+          key: ipa-nulls-brawl-${{ steps.resolve.outputs.VER }}
+
+      - name: Скачать и распаковать ipa
+        env:
+          BINARY_URL: ${{ inputs.binary_url }}
+        run: bash tools/fetch_binary.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brawl-bin
+          path: brawl_bin
+          retention-days: 30
+
+  decompile:
+    needs: binary
+    runs-on: macos-14
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Поставить radare2 и r2ghidra
+        run: bash tools/setup_r2.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: brawl-bin
+          path: bin
+
+      - name: Проверить бинарь
+        run: |
+          set -euo pipefail
+          BIN="$(find bin -type f | head -1)"
+          test -s "$BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          file "$BIN"
+          wc -c < "$BIN"
+          r2 -q -c 'pdg?' "$BIN" 2>&1 | head -3 || true
+
+      - uses: actions/cache/restore@v4
+        id: proj
+        with:
+          path: r2proj
+          key: r2proj-${{ env.R2V }}-${{ needs.binary.outputs.ver }}
+          restore-keys: r2proj-${{ env.R2V }}-
+
+      - name: Анализ
+        if: steps.proj.outputs.cache-hit != 'true'
+        env:
+          PHASE: analyze
+          BUDGET: ${{ inputs.seconds_budget || '18000' }}
+        run: bash tools/decompile.sh
+
+      - uses: actions/cache/save@v4
+        if: steps.proj.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          path: r2proj
+          key: r2proj-${{ env.R2V }}-${{ needs.binary.outputs.ver }}
+
+      - name: Декомпиляция
+        env:
+          BUDGET: ${{ inputs.seconds_budget || '18000' }}
+        run: bash tools/decompile.sh
+
+      - name: Разложить по IDE
+        run: |
+          python3 tools/split_decompiled.py \
+            --code decompiled.c \
+            --functions functions.json \
+            --engine-file engine.txt \
+            --out decompiled \
+            --version "${{ needs.binary.outputs.ver }}"
+
+      - name: Проверка
+        run: |
+          set -euo pipefail
+          FILES=$(find decompiled/src -name '0x*.c' | wc -l | tr -d ' ')
+          echo "файлов с функциями: $FILES"
+          if [ "$FILES" -lt 1 ]; then
+            echo "::error::функции не разложились — смотри r2.log"
+            tail -40 r2.log || true
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          set +e
+          S="$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Декомпиляция Null's Brawl"
+            echo ""
+            echo "| что | значение |"
+            echo "|---|---|"
+            sed 's/^/| /; s/=/ | /; s/$/ |/' engine.txt 2>/dev/null
+            echo "| файлов с функциями | $(find decompiled/src -name '0x*.c' 2>/dev/null | wc -l | tr -d ' ') |"
+            echo "| размер кода | $(du -sh decompiled 2>/dev/null | cut -f1) |"
+            echo ""
+          } >> "$S"
+          echo '```' >> "$S"
+          tail -12 r2.log >> "$S" 2>/dev/null
+          echo '```' >> "$S"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: decompiled-nulls-brawl-${{ needs.binary.outputs.ver }}
+          path: |
+            decompiled/
+            decompiled.c
+            engine.txt
+            r2.log
+            analyze.log
+            functions.json
+            renames.r2
+            out_patterns/
+          retention-days: 30
+          if-no-files-found: warn
