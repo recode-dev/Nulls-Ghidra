@@ -87,10 +87,27 @@ fi
 rm -f "$CODE" "$LOG" "$ENG"
 : > "$LOG"
 
+watch() {
+  local b=$1 out=$2 i=0 mb n
+  while [ "$i" -lt "$b" ]; do
+    sleep 60
+    i=$((i + 60))
+    mb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1048576 ))
+    n=$(grep -c '^{$' "$out" 2>/dev/null || echo 0)
+    echo "dump ${i}s ${mb}MB ${n:-0} funcs"
+  done
+}
+
 dump() {
   local b=$1 c=$2 out=$3
   if [ "${R2_GHIDRA:-1}" = 0 ] && [ "$c" = 'pdg @@f' ]; then return 1; fi
+  echo "dump start $c budget ${b}s"
+  watch "$b" "$out" &
+  local w=$!
   kill_at "$b" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c "$c" ${RN[@]+"${RN[@]}"} "$BIN" > "$out" 2>> "$LOG"
+  local r=$?
+  kill "$w" 2>/dev/null
+  return $r
 }
 
 REST=$((BUDGET - AE))
