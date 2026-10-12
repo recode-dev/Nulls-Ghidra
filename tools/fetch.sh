@@ -51,32 +51,25 @@ while IFS= read -r f; do
 done < /tmp/cand.txt
 sort -rn /tmp/macho.txt 2>/dev/null | head -5
 
-UNITY="$APP/Frameworks/UnityFramework.framework/UnityFramework"
-if [ -f "$UNITY" ]; then
-  PICK=$UNITY
-elif [ -s /tmp/macho.txt ]; then
-  PICK=$(sort -rn /tmp/macho.txt | head -1 | cut -d' ' -f2-)
-else
-  PICK=""
+EXEC=""
+if [ -f "$APP/Info.plist" ]; then
+  EXEC=$(python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable','') or '')" "$APP/Info.plist" 2>/dev/null || true)
 fi
 
 rm -f "$OUT"
+PICK=""
+if [ -n "$EXEC" ] && [ -f "$APP/$EXEC" ] && file "$APP/$EXEC" 2>/dev/null | grep -q Mach-O; then
+  PICK="$APP/$EXEC"
+  echo "pick exec $EXEC"
+elif [ -s /tmp/macho.txt ]; then
+  PICK=$(sort -rn /tmp/macho.txt | head -1 | cut -d' ' -f2-)
+  echo "pick largest mach-o"
+fi
+
 if [ -n "$PICK" ] && [ -f "$PICK" ]; then
   cp -f "$PICK" "$OUT"
 fi
-if [ ! -s "$OUT" ]; then
-  EXEC=$(python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable','') or '')" "$APP/Info.plist" 2>/dev/null || true)
-  if [ -n "$EXEC" ] && [ -f "$APP/$EXEC" ]; then
-    cp -f "$APP/$EXEC" "$OUT"
-  fi
-fi
-if [ ! -s "$OUT" ]; then
-  while IFS= read -r f; do
-    file "$f" 2>/dev/null | grep -q Mach-O || continue
-    cp -f "$f" "$OUT"
-    break
-  done < /tmp/cand.txt
-fi
+
 [ -s "$OUT" ] || { echo "no mach-o found"; exit 1; }
 
 SIZE=$(wc -c < "$OUT" | tr -d ' ')
