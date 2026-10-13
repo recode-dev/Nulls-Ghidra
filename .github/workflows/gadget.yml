@@ -1,0 +1,96 @@
+name: gadget
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: frida version
+        default: '17.23.3'
+      script:
+        description: script path inside Documents
+        default: 'updated/script_69_252.js'
+      cs:
+        description: code_signing (optional works with Interceptor, required does not)
+        default: 'optional'
+      release:
+        description: '1 = publish release'
+        default: '0'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gadget.yml'
+      - 'tools/mkfw.sh'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gadget-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ldid
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 -o /tmp/ldid "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64"
+          chmod +x /tmp/ldid
+          if ! /tmp/ldid -h >/dev/null 2>&1; then codesign -f -s - /tmp/ldid; fi
+          sudo install -m 755 /tmp/ldid /usr/local/bin/ldid
+          ldid -h 2>&1 | head -2
+
+      - name: gadget
+        env:
+          V: ${{ inputs.version || '17.23.3' }}
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 -o gadget.gz "https://github.com/frida/frida/releases/download/${V}/frida-gadget-${V}-ios-universal.dylib.gz"
+          gunzip -f gadget.gz
+          file gadget
+          echo "V=$V" >> "$GITHUB_ENV"
+
+      - name: framework
+        env:
+          FRIDA_VERSION: ${{ inputs.version || '17.23.3' }}
+          SCRIPT_PATH: ${{ inputs.script || 'updated/script_69_252.js' }}
+          CODE_SIGNING: ${{ inputs.cs || 'optional' }}
+        run: bash tools/mkfw.sh gadget .
+
+      - name: verify
+        run: |
+          set -euo pipefail
+          plutil -lint FridaGadget.framework/Info.plist
+          python3 -c "import json;json.load(open('FridaGadget.framework/FridaGadget.config'))"
+          grep -o '"code_signing": "[a-z]*"' FridaGadget.framework/FridaGadget.config
+          codesign -dvv FridaGadget.framework/FridaGadget 2>&1 | grep -iE "signature|identifier" || true
+          otool -hv FridaGadget.framework/FridaGadget | head -4
+
+      - name: pack
+        run: |
+          set -euo pipefail
+          zip -qry "FridaGadget.framework.zip" FridaGadget.framework
+          unzip -l "FridaGadget.framework.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FridaGadget-framework-${{ env.V }}
+          path: FridaGadget.framework.zip
+          retention-days: 30
+
+      - name: release
+        if: inputs.release == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="frida-gadget-${V}-$(date -u +%Y%m%d)-r${{ github.run_number }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" FridaGadget.framework.zip --clobber
+          else
+            gh release create "$TAG" FridaGadget.framework.zip --title "$TAG" --notes "FridaGadget.framework for frida ${V}"
+          fi
