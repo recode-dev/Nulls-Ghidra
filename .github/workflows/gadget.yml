@@ -19,7 +19,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/gadget.yml'
-      - 'tools/mkfw.sh'
+      - 'gadget/**'
 
 permissions:
   contents: write
@@ -59,7 +59,7 @@ jobs:
           FRIDA_VERSION: ${{ inputs.version || '17.23.3' }}
           SCRIPT_PATH: ${{ inputs.script || 'updated/script_69_252.js' }}
           CODE_SIGNING: ${{ inputs.cs || 'optional' }}
-        run: bash tools/mkfw.sh gadget .
+        run: bash gadget/mkfw.sh gadget .
 
       - name: verify
         run: |

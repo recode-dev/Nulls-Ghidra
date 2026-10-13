@@ -13,7 +13,12 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/decompile.yml'
-      - 'tools/**'
+      - 'tools/fetch.sh'
+      - 'tools/r2setup.sh'
+      - 'tools/decomp.sh'
+      - 'tools/split.py'
+      - 'tools/json2r2.py'
+      - 'tools/patmatch.py'
 
 permissions:
   contents: read
