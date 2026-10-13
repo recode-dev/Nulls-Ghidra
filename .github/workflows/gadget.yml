@@ -38,7 +38,7 @@ jobs:
       - name: ldid
         run: |
           set -euo pipefail
-          curl -fL --retry 5 -o /tmp/ldid "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64"
+          curl -fL --retry 5 --retry-all-errors -o /tmp/ldid "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64"
           chmod +x /tmp/ldid
           if ! /tmp/ldid -h >/dev/null 2>&1; then codesign -f -s - /tmp/ldid; fi
           sudo install -m 755 /tmp/ldid /usr/local/bin/ldid
@@ -49,9 +49,9 @@ jobs:
           V: ${{ inputs.version || '17.23.3' }}
         run: |
           set -euo pipefail
-          curl -fL --retry 5 -o gadget.gz "https://github.com/frida/frida/releases/download/${V}/frida-gadget-${V}-ios-universal.dylib.gz"
-          gunzip -f gadget.gz
-          file gadget
+          curl -fL --retry 5 --retry-all-errors -o dylib.gz "https://github.com/frida/frida/releases/download/${V}/frida-gadget-${V}-ios-universal.dylib.gz"
+          gunzip -f dylib.gz
+          file dylib
           echo "V=$V" >> "$GITHUB_ENV"
 
       - name: framework
@@ -59,7 +59,7 @@ jobs:
           FRIDA_VERSION: ${{ inputs.version || '17.23.3' }}
           SCRIPT_PATH: ${{ inputs.script || 'updated/script_69_252.js' }}
           CODE_SIGNING: ${{ inputs.cs || 'optional' }}
-        run: bash gadget/mkfw.sh gadget .
+        run: bash gadget/mkfw.sh dylib .
 
       - name: verify
         run: |
