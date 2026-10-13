@@ -12,6 +12,9 @@ on:
       cs:
         description: code_signing (optional works with Interceptor, required does not)
         default: 'optional'
+      arch:
+        description: slice to keep (arm64 for apps, arm64e also exists)
+        default: 'arm64'
       release:
         description: '1 = publish release'
         default: '0'
@@ -59,6 +62,7 @@ jobs:
           FRIDA_VERSION: ${{ inputs.version || '17.23.3' }}
           SCRIPT_PATH: ${{ inputs.script || 'updated/script_69_252.js' }}
           CODE_SIGNING: ${{ inputs.cs || 'optional' }}
+          ARCH: ${{ inputs.arch || 'arm64' }}
         run: bash gadget/mkfw.sh dylib .
 
       - name: verify
@@ -68,7 +72,8 @@ jobs:
           python3 -c "import json;json.load(open('FridaGadget.framework/FridaGadget.config'))"
           grep -o '"code_signing": "[a-z]*"' FridaGadget.framework/FridaGadget.config
           codesign -dvv FridaGadget.framework/FridaGadget 2>&1 | grep -iE "signature|identifier" || true
-          otool -hv FridaGadget.framework/FridaGadget | head -4
+          lipo -archs FridaGadget.framework/FridaGadget
+          du -h FridaGadget.framework/FridaGadget
 
       - name: pack
         run: |

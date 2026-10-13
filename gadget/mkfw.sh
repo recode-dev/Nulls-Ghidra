@@ -6,6 +6,7 @@ OUT=${2:-.}
 VER=${FRIDA_VERSION:-unknown}
 SCRIPT=${SCRIPT_PATH:-updated/script_69_252.js}
 CS=${CODE_SIGNING:-optional}
+ARCH=${ARCH:-arm64}
 FW="$OUT/FridaGadget.framework"
 ID='@executable_path/Frameworks/FridaGadget.framework/FridaGadget'
 
@@ -13,6 +14,18 @@ rm -rf "$FW"
 mkdir -p "$FW"
 cp "$DYLIB" "$FW/FridaGadget"
 chmod 755 "$FW/FridaGadget"
+
+if command -v lipo >/dev/null 2>&1; then
+  ARCHS=$(lipo -archs "$FW/FridaGadget" 2>/dev/null || echo "")
+  case "$ARCHS" in
+    *" "*)
+      lipo -thin "$ARCH" "$FW/FridaGadget" -output "$FW/FridaGadget.thin"
+      mv "$FW/FridaGadget.thin" "$FW/FridaGadget"
+      echo "thin: $ARCH (was: $ARCHS)"
+      ;;
+    *) echo "arch: $ARCHS" ;;
+  esac
+fi
 
 cat > "$FW/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
