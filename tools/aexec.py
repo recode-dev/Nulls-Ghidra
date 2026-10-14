@@ -35,6 +35,16 @@ def resolve(ident):
             int(big['size']), big['name'])
 
 
+def z64(extra):
+    p = 0
+    while p + 4 <= len(extra):
+        hid, hsz = struct.unpack_from('<HH', extra, p)
+        if hid == 1:
+            return extra[p + 4:p + 4 + hsz]
+        p += 4 + hsz
+    return b''
+
+
 def pick(cd, want, suffix):
     p = 0
     rows = []
@@ -43,6 +53,19 @@ def pick(cd, want, suffix):
         nlen, elen, clen = struct.unpack_from('<HHH', cd, p + 28)
         lho, = struct.unpack_from('<I', cd, p + 42)
         name = cd[p + 46:p + 46 + nlen].decode('utf-8', 'replace')
+        if 0xFFFFFFFF in (csz, usz, lho):
+            d = z64(cd[p + 46 + nlen:p + 46 + nlen + elen])
+            vals = list(struct.unpack_from('<%dQ' % (len(d) // 8), d, 0))
+            order = [k for k, v in (('usz', usz), ('csz', csz), ('lho', lho)) if v == 0xFFFFFFFF]
+            if len(vals) < len(order):
+                sys.exit('zip64 extra truncated for %s' % name)
+            for k, v in zip(order, vals):
+                if k == 'usz':
+                    usz = v
+                elif k == 'csz':
+                    csz = v
+                else:
+                    lho = v
         rows.append((name, lho, csz, usz))
         p += 46 + nlen + elen + clen
     if want:
