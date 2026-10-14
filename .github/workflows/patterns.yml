@@ -1,0 +1,94 @@
+name: patterns
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_rate:
+        description: minimum matched+weak share
+        default: "0.60"
+      refs:
+        description: also grade against official builds
+        type: boolean
+        default: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install capstone
+      - name: fetch
+        run: |
+          bash tools/fetch.sh
+          ls -l brawl_bin
+      - name: scan
+        run: python3 tools/nbscan.py brawl_bin out/current
+      - name: resolve
+        run: |
+          P=$(ls -1 patterns/*.json.gz | tail -1)
+          echo "patterns $P"
+          python3 tools/patrun.py --bin brawl_bin --patterns "$P" \
+            --starts out/current.json --out resolved_current.csv --report resolved_current.md \
+            --require anchors.txt --min-rate "${{ inputs.min_rate }}"
+      - name: bootstrap
+        run: |
+          python3 tools/patgen.py --bin brawl_bin --table out/current.json \
+            --version "$(cat version.txt)" --out "patterns/$(cat version.txt).json.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: patterns-report
+          path: |
+            resolved_current.csv
+            resolved_current.md
+            patterns/*.json.gz
+          compression-level: 0
+
+  refs:
+    if: inputs.refs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - item: com.supercell.laser-68.279-Decrypted
+            version: "68.279"
+          - item: Brawl_Stars_68.250_ios_15.0
+            version: "68.250"
+          - item: decrypt-download-com.supercell.laser
+            version: "66.263"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install capstone
+      - name: fetch
+        continue-on-error: true
+        run: |
+          python3 tools/aexec.py --item "${{ matrix.item }}" --entry laser --out "exec_${{ matrix.version }}"
+          ls -l "exec_${{ matrix.version }}"
+      - name: grade
+        run: |
+          set -e
+          E="exec_${{ matrix.version }}"
+          [ -s "$E" ] || { echo "no exec for ${{ matrix.version }}, skipped"; exit 0; }
+          P=$(ls -1 patterns/*.json.gz | tail -1)
+          python3 tools/nbscan.py "$E" "out/ref_${{ matrix.version }}"
+          python3 tools/patgen.py --bin "$E" --table "out/ref_${{ matrix.version }}.json" \
+            --version "${{ matrix.version }}" --out "patterns/${{ matrix.version }}.json.gz"
+          python3 tools/patrun.py --bin "$E" --patterns "$P" \
+            --starts "out/ref_${{ matrix.version }}.json" \
+            --out "resolved_${{ matrix.version }}.csv" --report "resolved_${{ matrix.version }}.md" \
+            --require anchors.txt --min-rate 0.5
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ref-${{ matrix.version }}
+          path: |
+            resolved_${{ matrix.version }}.csv
+            resolved_${{ matrix.version }}.md
+          compression-level: 0
