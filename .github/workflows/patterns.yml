@@ -10,6 +10,10 @@ on:
         description: also grade against official builds
         type: boolean
         default: true
+      ipa_url:
+        description: direct ipa url, skips resolution
+        required: false
+        default: ""
 
 jobs:
   gate:
@@ -21,8 +25,16 @@ jobs:
           python-version: "3.12"
       - run: pip install capstone
       - name: fetch
+        env:
+          BINARY_URL: ${{ inputs.ipa_url }}
         run: |
-          bash tools/fetch.sh
+          ok=0
+          for i in 1 2 3; do
+            bash tools/fetch.sh && { ok=1; break; }
+            echo "fetch attempt $i failed"
+            sleep 20
+          done
+          [ "$ok" = 1 ] || { echo "fetch failed after 3 attempts"; exit 1; }
           ls -l brawl_bin
       - name: scan
         run: |

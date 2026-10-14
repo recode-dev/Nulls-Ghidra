@@ -6,13 +6,34 @@ OUT=${OUT_BIN:-brawl_bin}
 CACHE=${IPA_CACHE_DIR:-ipa_cache}
 VERFILE=${VERSION_FILE:-version.txt}
 
+loc_redirect() {
+  curl -sIL --max-time 30 --retry 3 --retry-delay 5 --retry-all-errors -A "Mozilla/5.0" "$1" 2>/dev/null \
+    | tr -d '\r' | awk 'tolower($1) == "location:" { l = $2 } END { if (l != "") print l }'
+}
+
+loc_page() {
+  curl -sL --max-time 30 --retry 3 --retry-delay 5 --retry-all-errors -A "Mozilla/5.0" "$1" 2>/dev/null \
+    | grep -oE "https?://[^\"'<> ]+\.ipa" | head -1
+}
+
 if [ -n "$URL" ]; then
   LOC=$URL
 else
-  LOC=$(curl -sIL -A "Mozilla/5.0" https://dnull.xyz/latest_bs_i \
-    | grep -i '^location:' | tail -1 | awk '{print $2}' | tr -d '\r\n')
+  LOC=""
+  for SRC in https://dnull.xyz/latest_bs_i https://nulls.ee/bs_latest_i; do
+    for _ in 1 2 3; do
+      LOC=$(loc_redirect "$SRC" || true)
+      case "$LOC" in *.ipa) break ;; esac
+      LOC=$(loc_page "$SRC" || true)
+      case "$LOC" in *.ipa) break ;; esac
+      LOC=""
+      sleep 5
+    done
+    if [ -n "$LOC" ]; then break; fi
+    echo "resolve failed $SRC"
+  done
 fi
-[ -n "$LOC" ] || { echo "no ipa url"; exit 1; }
+[ -n "$LOC" ] || { echo "no ipa url; set BINARY_URL"; exit 1; }
 
 VER=$(basename "$LOC" | sed -E 's/.*nb_([0-9][0-9.]*)_.*/\1/')
 case "$VER" in *.ipa|*/*|"") VER=unknown ;; esac
@@ -27,8 +48,11 @@ fi
 
 mkdir -p "$CACHE"
 if [ ! -s "$CACHE/bs.ipa" ]; then
-  curl -fL --retry 5 --retry-delay 5 --max-time 1800 -A "Mozilla/5.0" \
-    -o "$CACHE/bs.ipa" "$LOC"
+  if ! curl -fL --retry 5 --retry-delay 5 --retry-all-errors --max-time 1800 -A "Mozilla/5.0" \
+    -o "$CACHE/bs.ipa" "$LOC"; then
+    echo "download failed $LOC"
+    exit 1
+  fi
 fi
 
 WORK=${EXTRACT_DIR:-extract}
