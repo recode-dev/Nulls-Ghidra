@@ -1,0 +1,16 @@
+engine=pdg
+pdg_rc=0
+pdc_rc=none
+pdg_bodies=47944
+r2=6.2.4
+plugin=1
+budget=18000
+analyze_s=0
+pdg_budget_s=14400
+pdc_budget_s=3600
+dump_s=4211
+bin=brawl_bin
+bin_bytes=18117168
+code_bytes=100752226
+code_lines=2775783
+renames=13712
