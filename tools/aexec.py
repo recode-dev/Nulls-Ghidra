@@ -4,6 +4,7 @@ import json
 import os
 import struct
 import sys
+import urllib.parse
 import urllib.request
 import zlib
 
@@ -29,7 +30,9 @@ def resolve(ident):
     files = d['files']
     big = max((f for f in files if f['name'].lower().endswith(('.ipa', '.zip'))),
               key=lambda f: int(f.get('size', 1)))
-    return NODE % (srv, d['dir'].lstrip('/'), big['name']), int(big['size']), big['name']
+    return (NODE % (srv, urllib.parse.quote(d['dir'].lstrip('/'), safe='/'),
+                    urllib.parse.quote(big['name'], safe='')),
+            int(big['size']), big['name'])
 
 
 def pick(cd, want, suffix):
