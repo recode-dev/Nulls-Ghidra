@@ -19,9 +19,12 @@ on:
       - 'tools/split.py'
       - 'tools/json2r2.py'
       - 'tools/patmatch.py'
+      - 'tools/mksym.py'
+      - 'symbols/**'
+      - 'patterns/**'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: decompile-${{ github.ref }}
@@ -65,6 +68,23 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+
+      - name: symbols
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p symbols
+          RUN=$(gh run list -R "${{ github.repository }}" -w patterns -s success -L 1 --json databaseId -q '.[0].databaseId' || true)
+          if [ -n "$RUN" ]; then
+            if gh run download "$RUN" -R "${{ github.repository }}" -n symbols -D /tmp/sym; then
+              cp -f /tmp/sym/*.json symbols/ || true
+            else
+              echo "no symbols artifact in run $RUN"
+            fi
+          else
+            echo "no successful patterns run"
+          fi
+          ls -l symbols
 
       - run: bash tools/r2setup.sh
 
@@ -141,3 +161,19 @@ jobs:
             pat_out/
           retention-days: 30
           if-no-files-found: warn
+
+      - name: push
+        if: always()
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          V="${{ needs.fetch.outputs.ver }}"
+          mkdir -p symbols
+          if [ -s engine.txt ]; then cp engine.txt "symbols/$V.engine.txt"; fi
+          if [ -s "symbols/$V.json" ]; then
+            python3 tools/mksym.py --merge "symbols/$V.json" --ver "$V" --out "symbols/$V.json"
+          fi
+          git add symbols
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "symbols: $V from decompile [skip ci]"
+          git push

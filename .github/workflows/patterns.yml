@@ -14,6 +14,13 @@ on:
         description: direct ipa url, skips resolution
         required: false
         default: ""
+      push:
+        description: commit symbols and patterns back
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
 
 jobs:
   gate:
@@ -47,10 +54,29 @@ jobs:
           python3 tools/patrun.py --bin brawl_bin --patterns "$P" \
             --starts out/current.json --out resolved_current.csv --report resolved_current.md \
             --require anchors.txt --min-rate "${{ inputs.min_rate }}"
+      - name: symbols
+        run: |
+          python3 tools/mksym.py --csv resolved_current.csv --table out/current.json \
+            --ver "$(cat version.txt)" --out "symbols/$(cat version.txt).json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: symbols
+          path: symbols/*.json
+          compression-level: 0
       - name: bootstrap
         run: |
           python3 tools/patgen.py --bin brawl_bin --table out/current.json \
             --version "$(cat version.txt)" --out "patterns/$(cat version.txt).json.gz"
+
+      - name: push
+        if: inputs.push
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git add symbols patterns
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "symbols: $(cat version.txt) [skip ci]"
+          git push
       - uses: actions/upload-artifact@v4
         if: always()
         with:
