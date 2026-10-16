@@ -92,7 +92,7 @@ def build_index(nodes, key):
     return index
 
 
-def similarity(a, b):
+def similarity(a, b, stable_map=None):
     gained = 0.0
     total = 0.0
     for key, weight in FEATURES:
@@ -100,34 +100,33 @@ def similarity(a, b):
         if left or right:
             gained += weight * len(left & right) / len(left | right)
             total += weight
+    
+    if stable_map and (a['calls'] or b['calls']):
+        mapped_calls = {stable_map[c] for c in a['calls'] if c in stable_map}
+        if mapped_calls or b['calls']:
+            inter = len(mapped_calls & b['calls'])
+            union = len(mapped_calls | b['calls'])
+            gained += 3.0 * (inter / union if union else 1.0)
+            total += 3.0
+
     lines_a, lines_b = max(1, a['lines']), max(1, b['lines'])
     gained += 1.0 - abs(lines_a - lines_b) / max(lines_a, lines_b)
     total += 1.0
-    loops_a, loops_b = a['loops'], b['loops']
-    if loops_a or loops_b:
-        gained += len({loops_a} & {loops_b})
-        total += 1.0
     return gained / total if total else 0.0
 
 
-def candidate_pool(old_node, indexes):
-    pool = set()
-    for key in ('calls', 'strings', 'consts'):
-        for token in old_node[key]:
-            pool |= indexes[key].get(token, set())
-    return pool
-
-
-def score_candidates(old_rva, old_node, new_nodes, indexes, lines_ratio):
+def score_candidates(old_rva, old_node, new_nodes, indexes, lines_ratio, stable_map=None):
     lines = old_node['lines']
     scored = []
     for rva in candidate_pool(old_node, indexes):
         node = new_nodes[rva]
         if node['lines'] > lines * lines_ratio or node['lines'] * lines_ratio < lines:
             continue
-        scored.append((similarity(old_node, node), abs(rva - old_rva), rva))
+        score = similarity(old_node, node, stable_map)
+        scored.append((score, abs(rva - old_rva), rva))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     return scored
+
 
 
 def write_js(path, entries):
@@ -171,10 +170,15 @@ def main():
         print('[-] no name -> RVA pairs found in old_offsets')
         return
 
-    new_code_path = args.new_code or os.path.join(args.new_index, 'decompiled.c')
-    new_text = read_source(new_code_path)
+    new_code_path = args.new_code
+    if not new_code_path:
+        for cand in [os.path.join(args.new_index, 'decompiled.c'), 'decompiled.c']:
+            if os.path.exists(cand):
+                new_code_path = cand
+                break
+    new_text = read_source(new_code_path) if new_code_path else None
     if new_text is None:
-        print(f'[-] decompiled code not found: {new_code_path}')
+        print(f'[-] decompiled code not found in {args.new_index} or root')
         raise SystemExit(1)
     if not new_text.strip():
         print(f'[-] decompiled code is empty: {new_code_path}')
@@ -200,11 +204,17 @@ def main():
         if old_rva in new_nodes:
             stable[name] = old_rva
             continue
+    
+    # Резолвим остальное с учетом синергии (уже найденных функций)
+    stable_rva_map = {v: v for v in stable.values()}
+    for name, old_rva in targets.items():
+        if name in stable:
+            continue
         old_node = old_nodes.get(old_rva)
         if not old_node:
             unresolved[name] = old_rva
             continue
-        scored = score_candidates(old_rva, old_node, new_nodes, indexes, args.lines_ratio)
+        scored = score_candidates(old_rva, old_node, new_nodes, indexes, args.lines_ratio, stable_rva_map)
         if not scored:
             unresolved[name] = old_rva
             continue
