@@ -31,6 +31,7 @@ def parse_args():
     p.add_argument('--index_dir', default='', help='dump index directory')
     p.add_argument('--code', default='', help='decompiled dump providing accessor evidence')
     p.add_argument('--reference_binary', default='', help='binary of the build the reference map belongs to; enables signature transfer')
+    p.add_argument('--structural', action='store_true', help='order/size-rank alignment for code entries with class anchors')
     p.add_argument('--selftest', action='store_true', help='prove the signature masking survives address and immediate rewriting')
     p.add_argument('--filter', default='', help='restrict to names containing this substring')
     p.add_argument('--out', default='', help='resolved map output (JSON, validated entries only)')
@@ -394,6 +395,36 @@ def transfer(binary, ref_binary, entries, funcs):
     return results
 
 
+def structural_map(binary, names, funcs, fps, centers):
+    order_entries = {}
+    size_entries = {}
+    classes = {class_of(n) for n, v in names.items() if v >= FIELD_LIMIT}
+    for klass in sorted(classes):
+        refs = sorted(((n, v) for n, v in names.items() if class_of(n) == klass and v >= FIELD_LIMIT), key=lambda kv: kv[1])
+        _, members = centers.get(klass, (None, []))
+        if not members or len(refs) < 2:
+            continue
+        cands = sorted(members)
+        ref_sizes = [refs[i + 1][1] - refs[i][1] for i in range(len(refs) - 1)]
+        ref_sizes.append(sorted(ref_sizes)[len(ref_sizes) // 2] if ref_sizes else 0)
+        cand_sizes = [funcs.get(hex(a), {}).get('size_chars', 0) for a in cands]
+        if len(cands) == len(refs):
+            order_pair = list(zip(refs, cands))
+        else:
+            order_pair = list(zip(refs, [cands[round(i * (len(cands) - 1) / max(1, len(refs) - 1))] for i in range(len(refs))]))
+        ref_by_size = sorted(range(len(refs)), key=lambda i: -ref_sizes[i])
+        cand_by_size = sorted(range(len(cands)), key=lambda i: -cand_sizes[i])
+        size_map = {}
+        for rank, idx in enumerate(ref_by_size):
+            if rank < len(cand_by_size):
+                size_map[refs[idx][0]] = cands[cand_by_size[rank]]
+        for (name, value), addr in order_pair:
+            order_entries[name] = addr
+        for name in size_map:
+            size_entries[name] = size_map[name]
+    return order_entries, size_entries
+
+
 def main():
     args = parse_args()
     names = parse_names(read_text(args.names))
@@ -411,6 +442,42 @@ def main():
     else:
         code_entries, data_entries = rest, {}
     bare = {n for n, v in names.items() if v == 0}
+
+    if args.structural:
+        by_class = {}
+        for name, value in fields.items():
+            by_class.setdefault(class_of(name), {})[name] = value
+        centers = {}
+        for klass, entries in by_class.items():
+            picks = []
+            for name, value in entries.items():
+                probe, source, strength, count = pick_accessor(hex(value), funcs, getters, readers, writers)
+                if probe is not None and strength in ('unique', 'clear') and valid_function_start(binary, probe, funcs):
+                    picks.append(probe)
+            centers[klass] = region_members(funcs, picks)
+        order_map, size_map = structural_map(binary, names, funcs, fps, centers)
+        agree = sorted(n for n in order_map if size_map.get(n) == order_map[n])
+        body = [f'- classes with anchors: {len(centers)}',
+                f'- assigned by reference order: {len(order_map)}',
+                f'- assigned by size rank: {len(size_map)}',
+                f'- both methods agree: {len(agree)}',
+                '', '| name | reference | order-based | size-rank | agreement | byte check |', '|---|---|---|---|---|---|']
+        for n in sorted(order_map):
+            a, b = order_map[n], size_map.get(n)
+            body.append(f'| {n} | 0x{names[n]:x} | 0x{a:x} | {hex(b) if b is not None else "-"} | '
+                        f'{"AGREE" if b == a else "disagree"} | {"real start" if valid_function_start(binary, a, funcs) else "no"} |')
+        report = '# structural alignment\n\n' + '\n'.join(body)
+        print(report)
+        if args.report:
+            with open(args.report, 'w', encoding='utf-8') as f:
+                f.write(report + '\n')
+        if args.out:
+            with open(args.out, 'w', encoding='utf-8') as f:
+                f.write('export const offsets = {\n')
+                for n in agree:
+                    f.write(f'    "{n}": 0x{agree[n] + binary.image_base:x},\n')
+                f.write('};\n')
+        return
 
     if args.selftest:
         sample = [int(o, 16) for o in sorted(funcs, key=lambda k: -funcs[k].get('size_chars', 0))[:3000]]
