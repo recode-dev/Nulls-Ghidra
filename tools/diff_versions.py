@@ -2,130 +2,97 @@
 import json
 import os
 import re
+import sys
 import argparse
+import urllib.request
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--old_offsets', required=True)
-    p.add_argument('--old_index', required=True)
+    p.add_argument('--old_index', default='')
     p.add_argument('--new_index', required=True)
     p.add_argument('--out_md', default='New_Offsets.md')
-    p.add_argument('--threshold', type=float, default=0.55)
+    p.add_argument('--threshold', type=float, default=0.5)
     return p.parse_args()
 
-def parse_offsets_md(path):
+def fetch_or_read(path_or_url):
+    if path_or_url.startswith('http://') or path_or_url.startswith('https://'):
+        req = urllib.request.Request(path_or_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp:
+            return resp.read().decode('utf-8', errors='ignore')
+    if os.path.exists(path_or_url):
+        with open(path_or_url, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    return path_or_url
+
+def parse_any_offsets(text):
     offsets = {}
-    with open(path, 'r', encoding='utf-8') as f:
-        for line in f:
-            m = re.match(r'^\s*([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)', line)
-            if m:
-                offsets[m.group(1)] = m.group(2).lower()
+    pats = [
+        re.compile(r'#define\s+([a-zA-Z0-9_]+)\s+(0x[0-9a-fA-F]+)', re.MULTILINE),
+        re.compile(r'([a-zA-Z0-9_]+)\s*[:=]\s*(?:ptr\()?\s*[\'"]?(0x[0-9a-fA-F]+)[\'"]?', re.MULTILINE),
+        re.compile(r'[\'"]([a-zA-Z0-9_]+)[\'"]\s*:\s*[\'"]?(0x[0-9a-fA-F]+)[\'"]?', re.MULTILINE),
+        re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)', re.MULTILINE)
+    ]
+    for pat in pats:
+        for m in pat.finditer(text):
+            k = m.group(1).strip()
+            v = m.group(2).strip().lower()
+            if v != '0x0' and v != '0x0ull' and k not in offsets:
+                offsets[k] = v
     return offsets
 
 def main():
     args = parse_args()
 
-    old_offs = parse_offsets_md(args.old_offsets)
+    content = fetch_or_read(args.old_offsets)
+    old_offs = parse_any_offsets(content)
 
-    with open(os.path.join(args.old_index, 'functions.json'), 'r') as f:
-        old_fn = json.load(f)
     with open(os.path.join(args.new_index, 'functions.json'), 'r') as f:
         new_fn = json.load(f)
 
-    old_fp_p = os.path.join(args.old_index, 'fingerprints.json')
     new_fp_p = os.path.join(args.new_index, 'fingerprints.json')
-
-    old_fp = json.load(open(old_fp_p)) if os.path.exists(old_fp_p) else {}
     new_fp = json.load(open(new_fp_p)) if os.path.exists(new_fp_p) else {}
+
+    old_fn = {}
+    old_fp = {}
+    if args.old_index and os.path.exists(os.path.join(args.old_index, 'functions.json')):
+        with open(os.path.join(args.old_index, 'functions.json'), 'r') as f:
+            old_fn = json.load(f)
+        if os.path.exists(os.path.join(args.old_index, 'fingerprints.json')):
+            with open(os.path.join(args.old_index, 'fingerprints.json'), 'r') as f:
+                old_fp = json.load(f)
 
     results = {}
     matched_mapping = {}
 
     for name, old_addr in old_offs.items():
-        if old_addr not in old_fn:
-            continue
-        old_meta = old_fn[old_addr]
-        old_strs = set(old_meta.get('strings', []))
-        if old_strs:
-            best_cand = None
-            best_overlap = 0
-            for new_addr, new_meta in new_fn.items():
-                overlap = len(old_strs.intersection(set(new_meta.get('strings', []))))
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_cand = new_addr
-            if best_cand and best_overlap >= min(1, len(old_strs)):
-                results[name] = best_cand
-                matched_mapping[old_addr] = best_cand
+        if old_addr in new_fn:
+            results[name] = old_addr
+            matched_mapping[old_addr] = old_addr
 
     for name, old_addr in old_offs.items():
         if name in results:
             continue
-        if old_addr not in old_fn:
-            results[name] = "0x0"
-            continue
-
-        old_meta = old_fn[old_addr]
-        old_fprint = old_fp.get(old_addr, {})
-        old_fields = set(old_fprint.get('fields_accessed', []))
-        old_consts = set(old_fprint.get('math_constants', []))
 
         best_cand = None
         best_score = 0.0
 
-        for new_addr, new_meta in new_fn.items():
-            score = 0.0
-            weight = 0.0
+        if old_addr in old_fn:
+            old_meta = old_fn[old_addr]
+            old_strs = set(old_meta.get('strings', []))
+            for new_addr, new_meta in new_fn.items():
+                if old_strs and old_strs.intersection(set(new_meta.get('strings', []))):
+                    best_cand = new_addr
+                    best_score = 1.0
+                    break
 
-            old_callers = set(old_meta.get('callers', []))
-            new_callers = set(new_meta.get('callers', []))
-            propagated_callers = sum(1 for c in old_callers if matched_mapping.get(c) in new_callers)
-            if old_callers:
-                score += (propagated_callers / len(old_callers)) * 0.4
-                weight += 0.4
-
-            old_calls = set(old_meta.get('calls', []))
-            new_calls = set(new_meta.get('calls', []))
-            propagated_calls = sum(1 for c in old_calls if matched_mapping.get(c) in new_calls)
-            if old_calls:
-                score += (propagated_calls / len(old_calls)) * 0.3
-                weight += 0.3
-
-            new_fprint = new_fp.get(new_addr, {})
-            new_fields = set(new_fprint.get('fields_accessed', []))
-            new_consts = set(new_fprint.get('math_constants', []))
-
-            if old_fields or new_fields:
-                f_sim = len(old_fields.intersection(new_fields)) / max(1, len(old_fields.union(new_fields)))
-                score += f_sim * 0.2
-                weight += 0.2
-
-            if old_consts or new_consts:
-                c_sim = len(old_consts.intersection(new_consts)) / max(1, len(old_consts.union(new_consts)))
-                score += c_sim * 0.1
-                weight += 0.1
-
-            sz1 = old_meta.get('size_chars', 0)
-            sz2 = new_meta.get('size_chars', 0)
-            if sz1 and sz2:
-                sz_sim = min(sz1, sz2) / max(sz1, sz2)
-                score += sz_sim * 0.1
-                weight += 0.1
-
-            final_sim = score / weight if weight > 0 else 0.0
-            if final_sim > best_score:
-                best_score = final_sim
-                best_cand = new_addr
-
-        if best_score >= args.threshold:
-            results[name] = best_cand
-            matched_mapping[old_addr] = best_cand
-        else:
-            results[name] = "0x0"
+        results[name] = best_cand or (old_addr if old_addr in new_fn else "0x0")
 
     with open(args.out_md, 'w', encoding='utf-8') as f:
+        f.write("# Auto-Diffed Offsets\n\n```c\n")
         for k, v in results.items():
-            f.write(f"{k:<42} = {v}\n")
+            f.write(f"#define {k:<42} {v}\n")
+        f.write("```\n")
 
 if __name__ == '__main__':
     main()

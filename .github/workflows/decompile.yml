@@ -4,10 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: ipa url override
+        description: binary/IPA/APK URL override
+        default: ''
+      diff_offsets_url:
+        description: optional URL or raw text of old offsets (C / JS / TS / JSON)
         default: ''
       symbolize:
-        description: generate IDA/Ghidra/r2 symbol maps
+        description: generate IDA / Ghidra / radare2 symbol maps
         type: boolean
         default: true
       extract_all:
@@ -23,7 +26,7 @@ on:
         type: boolean
         default: true
       seconds:
-        description: total seconds for analyze + dump
+        description: total analysis budget in seconds
         default: '18000'
   push:
     branches: [main]
@@ -150,6 +153,13 @@ jobs:
             --index_dir index_data \
             --out_dir symbols_out
 
+      - if: ${{ inputs.diff_offsets_url != '' }}
+        run: |
+          python3 tools/diff_versions.py \
+            --old_offsets "${{ inputs.diff_offsets_url }}" \
+            --new_index index_data \
+            --out_md Diffed_Offsets.md
+
       - if: always()
         run: |
           {
@@ -161,6 +171,10 @@ jobs:
             echo "| Strings | $(jq '. | length' index_data/strings.json 2>/dev/null || echo 0) |"
             echo "| Classes | $(jq '. | length' index_data/classes.json 2>/dev/null || echo 0) |"
             echo "| Symbols | $(jq '. | length' symbols_out/symbols.json 2>/dev/null || echo 0) |"
+            if [ -f Diffed_Offsets.md ]; then
+              echo "### 🎯 Auto Diffed Offsets"
+              cat Diffed_Offsets.md
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -170,6 +184,7 @@ jobs:
           path: |
             index_data/
             symbols_out/
+            Diffed_Offsets.md
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
