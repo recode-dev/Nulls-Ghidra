@@ -3,12 +3,28 @@ name: decompile
 on:
   workflow_dispatch:
     inputs:
-      seconds:
-        description: total seconds for analyze + dump
-        default: '18000'
       url:
         description: ipa url override
         default: ''
+      symbolize:
+        description: generate IDA/Ghidra/r2 symbol maps
+        type: boolean
+        default: true
+      extract_all:
+        description: extract strings, xrefs, and call graphs
+        type: boolean
+        default: true
+      fingerprint:
+        description: extract structural fingerprints
+        type: boolean
+        default: true
+      reconstruct_classes:
+        description: reconstruct C++ classes
+        type: boolean
+        default: true
+      seconds:
+        description: total seconds for analyze + dump
+        default: '18000'
   push:
     branches: [main]
     paths:
@@ -108,41 +124,52 @@ jobs:
           BUDGET: ${{ inputs.seconds || '18000' }}
         run: bash tools/decomp.sh
 
-      - run: |
+      - if: ${{ inputs.extract_all != false }}
+        run: |
           python3 tools/extract_all.py \
             --bin "$BIN" \
             --code decompiled.c \
             --out index_data \
             --ver "${{ needs.fetch.outputs.ver }}"
 
-      - run: |
+      - if: ${{ inputs.fingerprint != false }}
+        run: |
           python3 tools/fingerprint.py \
             --code decompiled.c \
             --out index_data/fingerprints.json
 
-      - run: |
+      - if: ${{ inputs.reconstruct_classes != false }}
+        run: |
           python3 tools/class_reconstructor.py \
             --index_dir index_data \
             --out index_data/classes.json
 
+      - if: ${{ inputs.symbolize != false }}
+        run: |
+          python3 tools/symbolize.py \
+            --index_dir index_data \
+            --out_dir symbols_out
+
       - if: always()
         run: |
           {
-            echo "### Dump Complete (${{ needs.fetch.outputs.ver }})"
+            echo "### Dump & Indexing Summary (${{ needs.fetch.outputs.ver }})"
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Cache Hit | ${{ steps.decompile-cache.outputs.cache-hit == 'true' }} |"
             echo "| Functions | $(jq '. | length' index_data/functions.json 2>/dev/null || echo 0) |"
             echo "| Strings | $(jq '. | length' index_data/strings.json 2>/dev/null || echo 0) |"
             echo "| Classes | $(jq '. | length' index_data/classes.json 2>/dev/null || echo 0) |"
+            echo "| Symbols | $(jq '. | length' symbols_out/symbols.json 2>/dev/null || echo 0) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dump-${{ needs.fetch.outputs.ver }}
+          name: full-dump-${{ needs.fetch.outputs.ver }}
           path: |
             index_data/
+            symbols_out/
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
