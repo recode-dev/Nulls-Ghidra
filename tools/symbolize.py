@@ -15,6 +15,25 @@ def sanitize_name(name):
     name = re.sub(r'_+', '_', name)
     return name.strip('_')
 
+def extract_symbol_from_string(s):
+    m_cpp = re.search(r'([A-Za-z0-9_]{2,40})::([A-Za-z0-9_]{2,40})', s)
+    if m_cpp:
+        return f"{m_cpp.group(1)}_{m_cpp.group(2)}"
+
+    m_objc = re.search(r'[+-]\[([A-Za-z0-9_]{2,40})\s+([A-Za-z0-9_:]{2,40})\]', s)
+    if m_objc:
+        return f"{m_objc.group(1)}_{m_objc.group(2)}"
+
+    m_tag = re.search(r'^\[([A-Za-z0-9_]{2,30})\]', s)
+    if m_tag:
+        return f"Module_{m_tag.group(1)}"
+
+    m_ctx = re.search(r'([A-Za-z0-9_]{3,30})\s*(?:failed|error|missing|warning|invalid|assert|not found|exception)', s, re.IGNORECASE)
+    if m_ctx:
+        return f"Handler_{m_ctx.group(1)}"
+
+    return None
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -37,45 +56,32 @@ def main():
     for s, offsets in sx.items():
         if len(offsets) == 1:
             off = offsets[0]
-            m = re.search(r'([A-Za-z0-9_]+)::([A-Za-z0-9_]+)', s)
-            if m:
-                symbols[off] = sanitize_name(f"{m.group(1)}_{m.group(2)}")
-            elif "DescriptionResolver:" in s:
-                m2 = re.search(r'DescriptionResolver:\s*([A-Za-z0-9_]+)', s)
-                if m2:
-                    symbols[off] = f"DescriptionResolver_{m2.group(1)}"
-            elif "Failed to find textfield:" in s:
-                symbols[off] = "MovieClip_findTextField"
-            elif "CombatHUD:" in s:
-                symbols[off] = "CombatHUD_preloadedGlyphs"
+            inferred = extract_symbol_from_string(s)
+            if inferred and off not in symbols:
+                symbols[off] = sanitize_name(inferred)
 
     if os.path.exists(fp_path):
         with open(fp_path, 'r', encoding='utf-8') as f:
             fps = json.load(f)
         for off, data in fps.items():
+            if off in symbols:
+                continue
+
             fields = data.get('fields_accessed', [])
             size = data.get('size', 0)
             calls_cnt = len(data.get('calls', []))
             callers_cnt = len(data.get('callers', []))
+            role = data.get('topology_role', '')
 
-            if '0x30' in fields and '0x34' in fields and '0x38' in fields and size < 120:
-                symbols[off] = "LogicGameObjectClient_setPosition"
-            elif '0x30' in fields and size < 80 and calls_cnt == 0:
-                if '300' in data.get('math_constants', []):
-                    symbols[off] = "LogicGameObjectClient_getTileX"
-                else:
-                    symbols[off] = "LogicGameObjectClient_getX"
-            elif '0x34' in fields and size < 80 and calls_cnt == 0:
-                if '300' in data.get('math_constants', []):
-                    symbols[off] = "LogicGameObjectClient_getTileY"
-                else:
-                    symbols[off] = "LogicGameObjectClient_getY"
-            elif '0x3c' in fields and '0x40' in fields and size < 150:
-                symbols[off] = "LogicGameObjectClient_resolveTeam"
-            elif callers_cnt > 500 and calls_cnt <= 2 and size < 200:
-                symbols[off] = "BattleMode_getInstance"
-            elif callers_cnt > 2000 and size < 150:
-                symbols[off] = "String_ctor"
+            if len(fields) == 1 and calls_cnt == 0 and size < 80:
+                symbols[off] = f"Getter_Field_{fields[0]}"
+            elif len(fields) >= 2 and calls_cnt == 0 and size < 120:
+                fields_tag = "_".join(fields[:3])
+                symbols[off] = f"Setter_Fields_{fields_tag}"
+            elif role == "root_update_loop":
+                symbols[off] = f"UpdateLoop_{off}"
+            elif role == "shared_utility_hub" and callers_cnt > 1000:
+                symbols[off] = f"CoreUtility_{off}"
 
     if os.path.exists(cls_path):
         with open(cls_path, 'r', encoding='utf-8') as f:
@@ -83,7 +89,7 @@ def main():
         for cls_id, data in classes.items():
             for idx, m_off in enumerate(data.get('methods', [])):
                 if m_off not in symbols:
-                    symbols[m_off] = f"{cls_id}_sub_{idx}"
+                    symbols[m_off] = f"{cls_id}_method_{idx}"
 
     with open(os.path.join(args.out_dir, 'symbols.json'), 'w', encoding='utf-8') as f:
         json.dump(symbols, f, indent=2)
