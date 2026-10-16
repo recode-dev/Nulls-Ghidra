@@ -15,23 +15,13 @@ def sanitize_name(name):
     name = re.sub(r'_+', '_', name)
     return name.strip('_')
 
-def extract_symbol_from_string(s):
+def extract_literal_signature(s):
     m_cpp = re.search(r'([A-Za-z0-9_]{2,40})::([A-Za-z0-9_]{2,40})', s)
     if m_cpp:
         return f"{m_cpp.group(1)}_{m_cpp.group(2)}"
-
     m_objc = re.search(r'[+-]\[([A-Za-z0-9_]{2,40})\s+([A-Za-z0-9_:]{2,40})\]', s)
     if m_objc:
         return f"{m_objc.group(1)}_{m_objc.group(2)}"
-
-    m_tag = re.search(r'^\[([A-Za-z0-9_]{2,30})\]', s)
-    if m_tag:
-        return f"Module_{m_tag.group(1)}"
-
-    m_ctx = re.search(r'([A-Za-z0-9_]{3,30})\s*(?:failed|error|missing|warning|invalid|assert|not found|exception)', s, re.IGNORECASE)
-    if m_ctx:
-        return f"Handler_{m_ctx.group(1)}"
-
     return None
 
 def main():
@@ -41,7 +31,6 @@ def main():
     sx_path = os.path.join(args.index_dir, 'strings_xref.json')
     fn_path = os.path.join(args.index_dir, 'functions.json')
     fp_path = os.path.join(args.index_dir, 'fingerprints.json')
-    cls_path = os.path.join(args.index_dir, 'classes.json')
 
     if not os.path.exists(sx_path) or not os.path.exists(fn_path):
         return
@@ -51,53 +40,61 @@ def main():
     with open(fn_path, 'r', encoding='utf-8') as f:
         fn = json.load(f)
 
+    fps = {}
+    if os.path.exists(fp_path):
+        with open(fp_path, 'r', encoding='utf-8') as f:
+            fps = json.load(f)
+
+    valid_entry_points = set(fn.keys())
     symbols = {}
+    used_names = {}
 
     for s, offsets in sx.items():
         if len(offsets) == 1:
             off = offsets[0]
-            inferred = extract_symbol_from_string(s)
-            if inferred and off not in symbols:
-                symbols[off] = sanitize_name(inferred)
+            if off in valid_entry_points:
+                sig = extract_literal_signature(s)
+                if sig:
+                    clean_name = sanitize_name(sig)
+                    if clean_name not in used_names:
+                        symbols[off] = clean_name
+                        used_names[clean_name] = off
 
-    if os.path.exists(fp_path):
-        with open(fp_path, 'r', encoding='utf-8') as f:
-            fps = json.load(f)
-        for off, data in fps.items():
-            if off in symbols:
-                continue
+    for off, data in fps.items():
+        if off not in valid_entry_points or off in symbols:
+            continue
 
-            fields = data.get('fields_accessed', [])
-            size = data.get('size', 0)
-            calls_cnt = len(data.get('calls', []))
-            callers_cnt = len(data.get('callers', []))
-            role = data.get('topology_role', '')
+        fields = data.get('fields_accessed', [])
+        lines = data.get('lines', 0)
+        calls_cnt = len(data.get('calls', []))
+        callers_cnt = len(data.get('callers', []))
+        consts = data.get('math_constants', [])
 
-            if len(fields) == 1 and calls_cnt == 0 and size < 80:
-                symbols[off] = f"Getter_Field_{fields[0]}"
-            elif len(fields) >= 2 and calls_cnt == 0 and size < 120:
-                fields_tag = "_".join(fields[:3])
-                symbols[off] = f"Setter_Fields_{fields_tag}"
-            elif role == "root_update_loop":
-                symbols[off] = f"UpdateLoop_{off}"
-            elif role == "shared_utility_hub" and callers_cnt > 1000:
-                symbols[off] = f"CoreUtility_{off}"
-
-    if os.path.exists(cls_path):
-        with open(cls_path, 'r', encoding='utf-8') as f:
-            classes = json.load(f)
-        for cls_id, data in classes.items():
-            for idx, m_off in enumerate(data.get('methods', [])):
-                if m_off not in symbols:
-                    symbols[m_off] = f"{cls_id}_method_{idx}"
+        if lines <= 5 and calls_cnt == 0:
+            if len(fields) == 1:
+                fld = fields[0]
+                if consts and any(c in ['300', '100', '60'] for c in consts):
+                    scale = consts[0]
+                    name = f"Getter_Scaled_{fld}_div_{scale}"
+                else:
+                    name = f"Getter_Raw_{fld}"
+                if name not in used_names:
+                    symbols[off] = name
+                    used_names[name] = off
+            elif len(fields) >= 2:
+                f_tag = "_".join(fields[:3])
+                name = f"Setter_Fields_{f_tag}"
+                if name not in used_names:
+                    symbols[off] = name
+                    used_names[name] = off
+        elif callers_cnt >= 500 and calls_cnt <= 2 and lines <= 20:
+            name = f"Singleton_Getter_{off}"
+            if name not in used_names:
+                symbols[off] = name
+                used_names[name] = off
 
     with open(os.path.join(args.out_dir, 'symbols.json'), 'w', encoding='utf-8') as f:
         json.dump(symbols, f, indent=2)
-
-    with open(os.path.join(args.out_dir, 'symbols.r2'), 'w', encoding='utf-8') as f:
-        for off, sym in symbols.items():
-            addr = f"0x100{off[2:]}" if off.startswith('0x') else f"0x100{off}"
-            f.write(f"f sym.{sym} @ {addr}\n")
 
     with open(os.path.join(args.out_dir, 'symbols.idc'), 'w', encoding='utf-8') as f:
         f.write('#include <idc.idc>\nstatic main() {\n')
@@ -106,11 +103,10 @@ def main():
             f.write(f'  set_name({addr}, "{sym}");\n')
         f.write('}\n')
 
-    with open(os.path.join(args.out_dir, 'symbols_ghidra.py'), 'w', encoding='utf-8') as f:
-        f.write('# @category Symbols\nfm = currentProgram.getFunctionManager()\n')
+    with open(os.path.join(args.out_dir, 'symbols.r2'), 'w', encoding='utf-8') as f:
         for off, sym in symbols.items():
             addr = f"0x100{off[2:]}" if off.startswith('0x') else f"0x100{off}"
-            f.write(f'a = toAddr({addr})\nf = fm.getFunctionAt(a)\nif f: f.setName("{sym}", SourceType.USER_DEFINED)\n')
+            f.write(f"f sym.{sym} @ {addr}\n")
 
 if __name__ == '__main__':
     main()
