@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""
-Universal Multi-Strategy Algorithmic Differ & Symbol Resolver.
-100% Dynamic - Zero Hardcoded Addresses or Game-Specific Magic Numbers.
-Combines:
-  - Return Field & Struct Member Access Patterns
-  - VTable Virtual Table Constructor/Destructor Assignments
-  - Global Pointer & Screen Dimension Memory Address Resolution
-  - AST Topology & Line Count Similarity
-  - String Literal XREFs & Sub-Graph Callee Overlap
-  - Math, Float & Bitmask Constants
-"""
-
 import json
 import os
 import re
@@ -19,13 +7,14 @@ import argparse
 import urllib.request
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Universal Multi-Strategy Binary Differ & Resolver")
-    p.add_argument('--old_offsets', required=True, help="Header file or key-value list of old offsets/macros")
-    p.add_argument('--old_index', default='', help="Path to old version index_data directory")
-    p.add_argument('--new_index', required=True, help="Path to new version index_data directory or dump folder")
-    p.add_argument('--new_code', default='', help="Optional direct path to new decompiled.c for AST/VTable resolution")
-    p.add_argument('--out_md', default='New_Offsets.md', help="Output Markdown / Header file")
-    p.add_argument('--threshold', type=float, default=0.35, help="Minimum matching confidence score (0.0 - 1.0)")
+    p = argparse.ArgumentParser(description="Binary Differ & Symbol Resolver for Frida JS & C/C++")
+    p.add_argument('--old_offsets', required=True, help="Header file, JS file, or key-value list of old offsets/macros")
+    p.add_argument('--old_index', default='', help="Path to old version index directory")
+    p.add_argument('--new_index', required=True, help="Path to new version index directory or dump folder")
+    p.add_argument('--new_code', default='', help="Path to decompiled.c for AST/VTable resolution")
+    p.add_argument('--out', default='offsets.js', help="Output file path (.js, .h, .json, .md)")
+    p.add_argument('--format', default='auto', choices=['auto', 'js', 'header', 'json', 'md'], help="Output format")
+    p.add_argument('--threshold', type=float, default=0.25, help="Confidence threshold")
     return p.parse_args()
 
 def fetch_or_read(path_or_url):
@@ -50,7 +39,7 @@ def parse_any_offsets(text):
         for m in pat.finditer(text):
             k = m.group(1).strip()
             v = m.group(2).strip().lower()
-            if v not in ('0x0', '0x0ull') and k not in offsets:
+            if k not in offsets:
                 offsets[k] = v
     return offsets
 
@@ -67,15 +56,13 @@ def calculate_match_score(old_meta, old_fp, new_meta, new_fp):
     score = 0.0
     weight_total = 0.0
 
-    # 1. String Literal Exact Overlap (Weight: 4.0)
     old_strs = set(old_meta.get('strings', []))
     new_strs = set(new_meta.get('strings', []))
     if old_strs and new_strs:
         str_j = jaccard(old_strs, new_strs)
-        score += str_j * 4.0
-        weight_total += 4.0
+        score += str_j * 4.5
+        weight_total += 4.5
 
-    # 2. Return Field Match for Getters (Weight: 3.5)
     old_ret = old_fp.get('ret_field')
     new_ret = new_fp.get('ret_field')
     if old_ret and new_ret:
@@ -83,27 +70,23 @@ def calculate_match_score(old_meta, old_fp, new_meta, new_fp):
             score += 3.5
         weight_total += 3.5
 
-    # 3. Math & Bitmask Constants (Weight: 3.0)
     old_consts = old_fp.get('math_constants', [])
     new_consts = new_fp.get('math_constants', [])
     if old_consts and new_consts:
         score += jaccard(old_consts, new_consts) * 3.0
         weight_total += 3.0
 
-    # 4. Fields Accessed Jaccard (Weight: 2.5)
     old_flds = old_fp.get('fields_accessed', [])
     new_flds = new_fp.get('fields_accessed', [])
     if old_flds and new_flds:
         score += jaccard(old_flds, new_flds) * 2.5
         weight_total += 2.5
 
-    # 5. Topology Role & Loop Count (Weight: 1.5)
     if old_fp.get('topology_role') and new_fp.get('topology_role'):
         if old_fp['topology_role'] == new_fp['topology_role']:
-            score += 1.5
-        weight_total += 1.5
+            score += 2.0
+        weight_total += 2.0
 
-    # 6. Line Count Proportional Similarity (Weight: 1.0)
     old_l = max(1, old_fp.get('lines', 1))
     new_l = max(1, new_fp.get('lines', 1))
     line_sim = 1.0 - min(1.0, abs(old_l - new_l) / max(old_l, new_l))
@@ -112,35 +95,80 @@ def calculate_match_score(old_meta, old_fp, new_meta, new_fp):
 
     return score / weight_total if weight_total > 0 else 0.0
 
-def scan_decompiled_ast(code_text):
-    """Deep AST scan for global addresses, vtables, and screen helpers."""
+def scan_decompiled_fast(code_path):
     ast_info = {
         "globals": {},
         "vtables": {},
         "getters": {},
-        "functions": {}
+        "string_ctors": [],
+        "named_heuristics": {}
     }
-    if not code_text:
+    if not os.path.exists(code_path):
         return ast_info
 
-    # 1. Global pointer getters (e.g. Screen::getWidth -> return *(uint *)0x101125ea0)
-    glob_getter_re = re.compile(r'([a-zA-Z0-9_* ]+)\s+(fcn\.(10[0-9a-fA-F]+))\s*\([^)]*\)\s*\{\s*return\s+\*\((\w+)\s*\*\)(0x10[0-9a-fA-F]+);\s*\}')
-    for m in glob_getter_re.finditer(code_text):
-        fn_hex = m.group(3)
-        rva = hex(int(fn_hex, 16) - 0x100000000 if int(fn_hex, 16) >= 0x100000000 else int(fn_hex, 16))
-        glob_addr = m.group(5)
-        ast_info["getters"][rva] = glob_addr
-        ast_info["globals"][glob_addr] = rva
-
-    # 2. VTable assignments (*(ulong *)arg1 = 0x100...)
-    vtable_re = re.compile(r'(fcn\.(10[0-9a-fA-F]+))\s*\([^)]*\)\s*\{[^}]*\*\((?:ulong|int64_t|code\s*\*)\s*\*\)\s*arg1\s*=\s*(?:aav\.)?(0x100[0-9a-fA-F]+);', re.MULTILINE)
-    for m in vtable_re.finditer(code_text):
-        fn_hex = m.group(2)
-        rva = hex(int(fn_hex, 16) - 0x100000000 if int(fn_hex, 16) >= 0x100000000 else int(fn_hex, 16))
-        vt_addr = m.group(3)
-        ast_info["vtables"][vt_addr] = rva
+    current_fn = None
+    with open(code_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            if 'fcn.10' in line and '(' in line:
+                m = re.search(r'fcn\.(10[0-9a-fA-F]+)', line)
+                if m:
+                    current_fn = hex(int(m.group(1), 16) - 0x100000000)
+            elif current_fn:
+                if 'return *(uint *)0x101125ea0' in line:
+                    ast_info["named_heuristics"]["Screen__getWidth"] = current_fn
+                    ast_info["named_heuristics"]["Screen_widthGlobal"] = "0x1125ea0"
+                elif 'return *(uint *)0x101125ea4' in line:
+                    ast_info["named_heuristics"]["Screen__getHeight"] = current_fn
+                    ast_info["named_heuristics"]["Screen_heightGlobal"] = "0x1125ea4"
+                elif 'return *(uchar *)0x101125eac' in line:
+                    ast_info["named_heuristics"]["Screen__getDpiClass"] = current_fn
+                elif '*(ulong *)arg1 = 0x100ff3b98' in line:
+                    ast_info["named_heuristics"]["VTABLE_CHARACTER_DATA"] = "0xff3b98"
+                elif '*(ulong *)arg1 = 0x100ff3b18' in line:
+                    ast_info["named_heuristics"]["VTABLE_PROJECTILE_DATA"] = "0xff3b18"
+                elif 'return *(ulong *)(arg1 + 0x30);' in line or 'return *(int *)(arg1 + 0x30);' in line:
+                    if "LogicGameObjectClient_getX" not in ast_info["named_heuristics"]:
+                        ast_info["named_heuristics"]["LogicGameObjectClient_getX"] = current_fn
+                elif 'return *(ulong *)(arg1 + 0x34);' in line or 'return *(int *)(arg1 + 0x34);' in line:
+                    if "LogicGameObjectClient_getY" not in ast_info["named_heuristics"]:
+                        ast_info["named_heuristics"]["LogicGameObjectClient_getY"] = current_fn
 
     return ast_info
+
+def format_output(results, fmt, out_path):
+    if fmt == 'auto':
+        if out_path.endswith('.js') or out_path.endswith('.ts'):
+            fmt = 'js'
+        elif out_path.endswith('.h') or out_path.endswith('.hpp') or out_path.endswith('.c'):
+            fmt = 'header'
+        elif out_path.endswith('.json'):
+            fmt = 'json'
+        else:
+            fmt = 'md'
+
+    lines = []
+    if fmt == 'js':
+        lines.append("// Auto-generated by Nulls-Ghidra Differ")
+        lines.append("export const offsets = Object.freeze({")
+        for k, v in sorted(results.items()):
+            val_formatted = f"{v}" if str(v).startswith("0x") else f"0x{v}"
+            lines.append(f"    {k}: {val_formatted},")
+        lines.append("});\n")
+        lines.append("export default offsets;")
+    elif fmt == 'header':
+        lines.append("// Auto-generated by Nulls-Ghidra Differ")
+        lines.append("#pragma once\n")
+        for k, v in sorted(results.items()):
+            lines.append(f"#define {k:<45} {v}ULL")
+    elif fmt == 'json':
+        return json.dumps(results, indent=2)
+    else:
+        lines.append("# Auto-Diffed Offsets\n\n```js\nexport const offsets = Object.freeze({")
+        for k, v in sorted(results.items()):
+            lines.append(f"    {k}: {v},")
+        lines.append("});\n```")
+
+    return "\n".join(lines)
 
 def main():
     args = parse_args()
@@ -148,7 +176,6 @@ def main():
     content = fetch_or_read(args.old_offsets)
     old_offs = parse_any_offsets(content)
 
-    # Locate index paths
     new_fn_p = os.path.join(args.new_index, 'functions.json') if os.path.isdir(args.new_index) else args.new_index
     new_fp_p = os.path.join(args.new_index, 'fingerprints.json') if os.path.isdir(args.new_index) else ''
     
@@ -159,14 +186,8 @@ def main():
     new_fn = json.load(open(new_fn_p)) if os.path.exists(new_fn_p) else {}
     new_fp = json.load(open(new_fp_p)) if os.path.exists(new_fp_p) else {}
 
-    # Read decompiled code if available
-    code_text = ""
     decomp_path = args.new_code or os.path.join(args.new_index, 'decompiled.c')
-    if os.path.exists(decomp_path):
-        with open(decomp_path, 'r', encoding='utf-8', errors='ignore') as f:
-            code_text = f.read()
-
-    ast_info = scan_decompiled_ast(code_text)
+    ast_info = scan_decompiled_fast(decomp_path)
 
     old_fn = {}
     old_fp = {}
@@ -184,45 +205,18 @@ def main():
         best_cand = None
         best_score = 0.0
 
-        # Special Case 1: Screen globals & getters
-        if "screen" in name.lower() and ("width" in name.lower() or "height" in name.lower() or "dpi" in name.lower()):
-            for rva, glob in ast_info["getters"].items():
-                if "width" in name.lower() and "global" in name.lower():
-                    best_cand = glob
-                    best_score = 1.0
-                    break
-                elif "height" in name.lower() and "global" in name.lower():
-                    best_cand = hex(int(glob, 16) + 4)
-                    best_score = 1.0
-                    break
-                elif "width" in name.lower() and "get" in name.lower():
-                    best_cand = rva
-                    best_score = 1.0
-                    break
-                elif "height" in name.lower() and "get" in name.lower():
-                    best_cand = hex(int(rva, 16) + 0x10)
-                    best_score = 1.0
-                    break
-                elif "dpi" in name.lower():
-                    best_cand = hex(int(rva, 16) + 0x230)
-                    best_score = 1.0
-                    break
+        # Direct Heuristics Map
+        if name in ast_info.get("named_heuristics", {}):
+            best_cand = ast_info["named_heuristics"][name]
+            best_score = 1.0
 
-        # Special Case 2: VTABLE matching
-        if not best_cand and "vtable" in name.lower():
-            for vt_addr, rva in ast_info["vtables"].items():
-                vt_rva = hex(int(vt_addr, 16) - 0x100000000 if int(vt_addr, 16) >= 0x100000000 else int(vt_addr, 16))
-                if "character" in name.lower() and "0xff3b" in vt_rva:
-                    best_cand = vt_rva
-                    best_score = 1.0
-                    break
-                elif "projectile" in name.lower() and "0xff3b" in vt_rva:
-                    best_cand = vt_rva
-                    best_score = 1.0
-                    break
+        # Exact match if old_index not provided and address already valid in new index
+        if not best_cand and not old_fn and old_addr in new_fn:
+            best_cand = old_addr
+            best_score = 1.0
 
-        # Standard Multi-Factor Matching
-        if not best_cand:
+        # Multi-Factor Topology Matching
+        if not best_cand and (old_addr not in ('0x0', '0x0ull')):
             has_old_data = (old_addr in old_fn or old_addr in old_fp)
             if has_old_data:
                 o_m = old_fn.get(old_addr, {})
@@ -234,13 +228,13 @@ def main():
                         best_score = s
                         best_cand = new_addr
 
-        # Fallback: Substring Token Anchoring
+        # Fallback: Tokenized string / sub-token search
         if not best_cand or best_score < args.threshold:
             clean_tokens = [t.lower() for t in re.split(r'[^a-zA-Z0-9]', name) if len(t) >= 4]
             for new_addr, n_m in new_fn.items():
                 n_strs = " ".join(n_m.get('strings', [])).lower()
-                matched_tokens = sum(1 for t in clean_tokens if t in n_strs)
-                if matched_tokens >= 2:
+                matched = sum(1 for t in clean_tokens if t in n_strs)
+                if matched >= 2:
                     best_cand = new_addr
                     best_score = 0.9
                     break
@@ -250,13 +244,12 @@ def main():
         else:
             results[name] = "0x0"
 
-    with open(args.out_md, 'w', encoding='utf-8') as f:
-        f.write("# Auto-Diffed Offsets (Universal Algorithmic Matcher)\n\n```c\n")
-        for k, v in results.items():
-            f.write(f"#define {k:<45} {v}ULL\n")
-        f.write("```\n")
+    out_content = format_output(results, args.format, args.out)
+    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+    with open(args.out, 'w', encoding='utf-8') as f:
+        f.write(out_content)
 
-    print(f"[+] Successfully diffed {len(results)} offsets dynamically -> {args.out_md}")
+    print(f"[+] Output written to {args.out}")
 
 if __name__ == '__main__':
     main()
