@@ -18,8 +18,10 @@ def main():
     with open(args.code, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
-    fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+(fcn\.(10[0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n\{', re.MULTILINE)
+    fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{', re.MULTILINE)
     matches = list(fn_pattern.finditer(text))
+    first = int(matches[0].group(3), 16) if matches else 0
+    base = (first >> 32) << 32 if first >= 0x100000000 else 0
 
     field_re = re.compile(r'\b(?:arg\w*|this|p\w*Var\d+|iVar\d+|uVar\d+|pvVar\d+|puVar\d+)\s*(?:\+\s*|\-\>\s*|\.\s*|\[\s*)(0x[0-9a-fA-F]+|\d+)')
     ret_field_re = re.compile(r'return\s+\*\((\w+)\s*\*\)\(\w+\s*\+\s*(0x[0-9a-fA-F]+|\d+)\);')
@@ -35,7 +37,8 @@ def main():
     for i in range(len(matches)):
         m = matches[i]
         addr_hex = m.group(3)
-        offset = int(addr_hex, 16) - 0x100000000 if int(addr_hex, 16) >= 0x100000000 else int(addr_hex, 16)
+        addr_value = int(addr_hex, 16)
+        offset = addr_value - base if addr_value >= base else addr_value
         off_str = f"0x{offset:x}"
 
         start_pos = m.start()
@@ -54,7 +57,7 @@ def main():
         vtables = list(dict.fromkeys(vt_re.findall(body)))
         loops_count = len(loop_re.findall(body))
         calls_raw = list(dict.fromkeys(call_re.findall(body)))
-        calls = [f"0x{int(a, 16) - 0x100000000:x}" for a in calls_raw if int(a, 16) >= 0x100000000 and a != addr_hex]
+        calls = [f"0x{(int(a, 16) - base) if int(a, 16) >= base else int(a, 16):x}" for a in calls_raw if a != addr_hex]
 
         fingerprints[off_str] = {
             "offset": off_str,
