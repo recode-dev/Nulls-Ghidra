@@ -74,7 +74,7 @@ def main():
             if len(fields) == 1:
                 fld = fields[0]
                 if consts and any(c in ['300', '100', '60'] for c in consts):
-                    scale = consts[0]
+                    scale = [c for c in consts if c in ['300', '100', '60']][0]
                     name = f"Getter_Scaled_{fld}_div_{scale}"
                 else:
                     name = f"Getter_Raw_{fld}"
@@ -87,11 +87,6 @@ def main():
                 if name not in used_names:
                     symbols[off] = name
                     used_names[name] = off
-        elif callers_cnt >= 500 and calls_cnt <= 2 and lines <= 20:
-            name = f"Singleton_Getter_{off}"
-            if name not in used_names:
-                symbols[off] = name
-                used_names[name] = off
 
     with open(os.path.join(args.out_dir, 'symbols.json'), 'w', encoding='utf-8') as f:
         json.dump(symbols, f, indent=2)
@@ -107,6 +102,12 @@ def main():
         for off, sym in symbols.items():
             addr = f"0x100{off[2:]}" if off.startswith('0x') else f"0x100{off}"
             f.write(f"f sym.{sym} @ {addr}\n")
+
+    with open(os.path.join(args.out_dir, 'symbols_ghidra.py'), 'w', encoding='utf-8') as f:
+        f.write('# @category Symbols\nfm = currentProgram.getFunctionManager()\n')
+        for off, sym in symbols.items():
+            addr = f"0x100{off[2:]}" if off.startswith('0x') else f"0x100{off}"
+            f.write(f'a = toAddr({addr})\nf = fm.getFunctionAt(a)\nif f: f.setName("{sym}", SourceType.USER_DEFINED)\n')
 
 if __name__ == '__main__':
     main()
