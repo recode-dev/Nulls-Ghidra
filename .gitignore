@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+*.zip
+*.tar.gz
+*.tar.xz
+.DS_Store
+tmp/
+temp/
+test_out/
+test_index/
+index_data/
+resolved_dump/
+dump_*/
+*.idc
+*.r2
