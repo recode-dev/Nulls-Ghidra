@@ -32,10 +32,14 @@ kill_at() {
 AE=0
 if [ -f .ae ]; then AE=$(cat .ae); fi
 
-json_r2() { python3 "$HERE/json2r2.py" symbols "$BIN" 2>/dev/null; }
+json_r2() {
+  [ -f "$HERE/json2r2.py" ] || return 0
+  python3 "$HERE/json2r2.py" symbols "$BIN" 2>/dev/null
+}
 
 pat_r2() {
   if [ ! -d patterns ]; then return 0; fi
+  [ -f "$HERE/patmatch.py" ] || return 0
   local fs
   fs=$(find patterns -name '*.md' | sort)
   if [ -z "$fs" ]; then return 0; fi

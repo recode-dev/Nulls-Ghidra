@@ -1,173 +1,231 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import os
 import re
-import sys
-import argparse
+import shutil
+import subprocess
 import urllib.request
 
+IMAGE_BASE = 0x100000000
+FN_RE = re.compile(r'\n[a-zA-Z0-9_* ]+\s+(fcn\.(10[0-9a-fA-F]+))\s*\([^)]*\)\s*\n?\s*\{')
+CALL_RE = re.compile(r'fcn\.(10[0-9a-fA-F]+)')
+STR_RE = re.compile(r'"([^"]{2,120})"')
+CONST_RE = re.compile(r'\b(0x[0-9a-fA-F]{4,16})\b')
+CHAIN_RE = re.compile(r'\*\((?:\w+\s*\*?\s*)*\([^)]+\+\s*(0x[0-9a-fA-F]+|\d+)\)')
+LOOP_RE = re.compile(r'\b(while|for|do)\b')
+TARGET_RES = [
+    re.compile(r'#define\s+([a-zA-Z0-9_]+)\s+(0x[0-9a-fA-F]+)', re.MULTILINE),
+    re.compile(r'[\'"]([a-zA-Z0-9_]+)[\'"]\s*:\s*[\'"]?(0x[0-9a-fA-F]+)', re.MULTILINE),
+    re.compile(r'([a-zA-Z0-9_]+)\s*:\s*(?:ptr\()?\s*[\'"]?(0x[0-9a-fA-F]+)', re.MULTILINE),
+    re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)', re.MULTILINE),
+]
+FEATURES = (('strings', 4.0), ('consts', 3.0), ('field_chains', 2.5), ('calls', 2.0))
+
+
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument('--old_offsets', required=True)
-    p.add_argument('--old_index', default='')
-    p.add_argument('--new_index', required=True)
-    p.add_argument('--new_code', default='')
-    p.add_argument('--out', default='offsets.js')
-    p.add_argument('--threshold', type=float, default=0.30)
+    p = argparse.ArgumentParser(description='Structural RVA carry-over between two decompiled builds')
+    p.add_argument('--old_offsets', required=True, help='path or URL of the previous name -> RVA map (C/JS/TS/JSON)')
+    p.add_argument('--new_index', required=True, help='index directory of the target build')
+    p.add_argument('--old_index', default='', help='index directory of the previous build (optional)')
+    p.add_argument('--new_code', default='', help='path to the target decompiled.c')
+    p.add_argument('--old_code', default='', help='path or URL of the previous decompiled.c (optional)')
+    p.add_argument('--out', default='offsets.js', help='JS export path')
+    p.add_argument('--out_md', default='', help='markdown report path')
+    p.add_argument('--threshold', type=float, default=0.55, help='minimum structural score to accept a candidate')
+    p.add_argument('--margin', type=float, default=0.05, help='required lead over the runner-up candidate')
+    p.add_argument('--lines-ratio', dest='lines_ratio', type=float, default=3.0, help='max line-count ratio between candidates')
     return p.parse_args()
 
-def fetch_or_read(path_or_url):
-    if path_or_url.startswith('http://') or path_or_url.startswith('https://'):
-        req = urllib.request.Request(path_or_url, headers={'User-Agent': 'Mozilla/5.0'})
+
+def read_source(src, allow_inline=False):
+    if not src:
+        return None
+    if src.startswith(('http://', 'https://')):
+        req = urllib.request.Request(src, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as resp:
             return resp.read().decode('utf-8', errors='ignore')
-    if os.path.exists(path_or_url):
-        with open(path_or_url, 'r', encoding='utf-8', errors='ignore') as f:
+    if os.path.exists(src):
+        with open(src, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
-    return path_or_url
+    return src if allow_inline else None
 
-def parse_input_targets(text):
+
+def parse_targets(text):
     targets = {}
-    pats = [
-        re.compile(r'([a-zA-Z0-9_]+)\s*:\s*(?:ptr\()?\s*[\'"]?(0x[0-9a-fA-F]+)[\'"]?', re.MULTILINE),
-        re.compile(r'#define\s+([a-zA-Z0-9_]+)\s+(0x[0-9a-fA-F]+)', re.MULTILINE),
-        re.compile(r'[\'"]([a-zA-Z0-9_]+)[\'"]\s*:\s*[\'"]?(0x[0-9a-fA-F]+)[\'"]?', re.MULTILINE),
-        re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)', re.MULTILINE)
-    ]
-    for pat in pats:
+    for pat in TARGET_RES:
         for m in pat.finditer(text):
-            k = m.group(1).strip()
-            v = m.group(2).strip().lower()
-            if k not in targets:
-                targets[k] = v
+            name = m.group(1).strip()
+            value = int(m.group(2).strip(), 16)
+            rva = value - IMAGE_BASE if value >= IMAGE_BASE else value
+            if rva > 0 and name not in targets:
+                targets[name] = rva
     return targets
 
-def extract_structural_ast(code_text):
-    fn_re = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+(fcn\.(10[0-9a-fA-F]+))\s*\(([^)]*)\)\s*\{', re.MULTILINE)
-    matches = list(fn_re.finditer(code_text))
 
-    field_chain_re = re.compile(r'\*(?:\(\w+\s*\*?\)\s*)*\([^)]+\+\s*(0x[0-9a-fA-F]+|\d+)\)')
-    ret_field_re = re.compile(r'return\s+\*\((\w+)\s*\*\)\(\w+\s*\+\s*(0x[0-9a-fA-F]+|\d+)\);')
-    ret_glob_re = re.compile(r'return\s+\*\((\w+)\s*\*\)(0x10[0-9a-fA-F]+);')
-    vtable_re = re.compile(r'\*\((?:ulong|int64_t|code\s*\*)\s*\*\)\s*arg1\s*=\s*(?:aav\.)?(0x100[0-9a-fA-F]+);')
-    const_re = re.compile(r'\b(0x[0-9a-fA-F]{4,16})\b')
-    call_re = re.compile(r'fcn\.(10[0-9a-fA-F]+)')
-    loop_re = re.compile(r'\b(while|for|do)\b')
-
+def extract_nodes(code):
+    matches = list(FN_RE.finditer(code))
     nodes = {}
     for i, m in enumerate(matches):
-        hex_addr = m.group(3)
-        rva = hex(int(hex_addr, 16) - 0x100000000 if int(hex_addr, 16) >= 0x100000000 else int(hex_addr, 16))
-        
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(code_text)
-        body = code_text[start:end]
-
-        ret_fld = ret_field_re.search(body)
-        ret_glob = ret_glob_re.search(body)
-        vt_match = vtable_re.search(body)
-
-        chains = list(dict.fromkeys(field_chain_re.findall(body)))
-        consts = list(dict.fromkeys(const_re.findall(body)))
-        calls_raw = list(dict.fromkeys(call_re.findall(body)))
-        calls = [hex(int(c, 16) - 0x100000000 if int(c, 16) >= 0x100000000 else int(c, 16)) for c in calls_raw if c != hex_addr]
-
+        addr = int(m.group(2), 16)
+        rva = addr - IMAGE_BASE if addr >= IMAGE_BASE else addr
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(code)
+        body = code[m.start():end]
+        calls = {int(a, 16) - IMAGE_BASE for a in CALL_RE.findall(body) if int(a, 16) >= IMAGE_BASE}
+        calls.discard(rva)
         nodes[rva] = {
-            "rva": rva,
-            "lines": len(body.splitlines()),
-            "chars": len(body),
-            "loops": len(loop_re.findall(body)),
-            "ret_field": ret_fld.group(2) if ret_fld else None,
-            "ret_global": ret_glob.group(2) if ret_glob else None,
-            "vtable": vt_match.group(1) if vt_match else None,
-            "field_chains": chains[:30],
-            "consts": consts[:15],
-            "calls": calls,
-            "callers": []
+            'lines': len(body.splitlines()),
+            'strings': set(STR_RE.findall(body)),
+            'consts': set(CONST_RE.findall(body)),
+            'field_chains': set(CHAIN_RE.findall(body)),
+            'calls': calls,
+            'loops': len(LOOP_RE.findall(body)),
         }
-
-    for rva, node in nodes.items():
-        for callee in node["calls"]:
-            if callee in nodes:
-                nodes[callee]["callers"].append(rva)
-
     return nodes
 
-def validate_stage1_alignment(rva_str):
-    try:
-        val = int(rva_str, 16)
-        if val <= 0:
-            return False
-        if val & 0x3 != 0 and val < 0x1000000:
-            return False
-        return True
-    except Exception:
-        return False
 
-def validate_stage2_graph_consistency(rva_str, nodes):
-    if rva_str in nodes:
-        node = nodes[rva_str]
-        if node["lines"] > 0:
-            return True
-    try:
-        val = int(rva_str, 16)
-        return val >= 0x10000
-    except Exception:
-        return False
+def build_index(nodes, key):
+    index = {}
+    for rva, node in nodes.items():
+        for token in node[key]:
+            index.setdefault(token, set()).add(rva)
+    return index
+
+
+def similarity(a, b):
+    gained = 0.0
+    total = 0.0
+    for key, weight in FEATURES:
+        left, right = a[key], b[key]
+        if left or right:
+            gained += weight * len(left & right) / len(left | right)
+            total += weight
+    lines_a, lines_b = max(1, a['lines']), max(1, b['lines'])
+    gained += 1.0 - abs(lines_a - lines_b) / max(lines_a, lines_b)
+    total += 1.0
+    loops_a, loops_b = a['loops'], b['loops']
+    if loops_a or loops_b:
+        gained += len({loops_a} & {loops_b})
+        total += 1.0
+    return gained / total if total else 0.0
+
+
+def candidate_pool(old_node, indexes):
+    pool = set()
+    for key in ('calls', 'strings', 'consts'):
+        for token in old_node[key]:
+            pool |= indexes[key].get(token, set())
+    return pool
+
+
+def score_candidates(old_rva, old_node, new_nodes, indexes, lines_ratio):
+    lines = old_node['lines']
+    scored = []
+    for rva in candidate_pool(old_node, indexes):
+        node = new_nodes[rva]
+        if node['lines'] > lines * lines_ratio or node['lines'] * lines_ratio < lines:
+            continue
+        scored.append((similarity(old_node, node), abs(rva - old_rva), rva))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return scored
+
+
+def write_js(path, entries):
+    lines = ['export const offsets = Object.freeze(', '    Object.fromEntries([']
+    for name, rva in entries.items():
+        lines.append(f'        ["{name}", 0x{rva:x}],')
+    lines.append('    ]),')
+    lines.append(');')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    formatter = shutil.which('clang-format')
+    if formatter:
+        subprocess.run([formatter, '-i', path], check=False)
+
+
+def write_md(path, ver_target, stable, matched, unresolved, old_values):
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(f'# Auto-Diffed Offsets ({ver_target})\n\n')
+        f.write(f'- carried over unchanged: **{len(stable)}**\n')
+        f.write(f'- resolved structurally: **{len(matched)}**\n')
+        f.write(f'- unresolved: **{len(unresolved)}**\n\n')
+        f.write('## Resolved\n\n```c\n')
+        for name in sorted(stable):
+            f.write(f'#define {name:<42} 0x{stable[name]:x}\n')
+        for name in sorted(matched):
+            f.write(f'#define {name:<42} 0x{matched[name]:x}\n')
+        f.write('```\n\n## Unresolved\n\n')
+        if unresolved:
+            f.write('| name | old RVA |\n|---|---|\n')
+            for name in sorted(unresolved):
+                f.write(f'| {name} | 0x{old_values[name]:x} |\n')
+        else:
+            f.write('none\n')
+
 
 def main():
     args = parse_args()
-    content = fetch_or_read(args.old_offsets)
-    targets = parse_input_targets(content)
+    old_text = read_source(args.old_offsets, allow_inline=True)
+    targets = parse_targets(old_text)
+    if not targets:
+        print('[-] no name -> RVA pairs found in old_offsets')
+        return
 
-    decomp_path = args.new_code or os.path.join(args.new_index, 'decompiled.c')
-    if not os.path.exists(decomp_path):
-        sys.exit(1)
+    new_code_path = args.new_code or os.path.join(args.new_index, 'decompiled.c')
+    new_text = read_source(new_code_path)
+    if new_text is None:
+        print(f'[-] decompiled code not found: {new_code_path}')
+        raise SystemExit(1)
+    if not new_text.strip():
+        print(f'[-] decompiled code is empty: {new_code_path}')
+        raise SystemExit(1)
 
-    with open(decomp_path, 'r', encoding='utf-8', errors='ignore') as f:
-        code_text = f.read()
+    new_nodes = extract_nodes(new_text)
+    old_code_path = args.old_code
+    if not old_code_path and args.old_index:
+        old_code_path = os.path.join(args.old_index, 'decompiled.c')
+    old_text_code = read_source(old_code_path) if old_code_path else None
+    old_nodes = extract_nodes(old_text_code) if old_text_code else {}
 
-    new_nodes = extract_structural_ast(code_text)
-    results = {}
+    indexes = {
+        'calls': build_index(new_nodes, 'calls'),
+        'strings': build_index(new_nodes, 'strings'),
+        'consts': build_index(new_nodes, 'consts'),
+    }
 
+    stable = {}
+    matched = {}
+    unresolved = {}
     for name, old_rva in targets.items():
-        if old_rva in ('0x0', '0x0ull', '0', '0ull'):
+        if old_rva in new_nodes:
+            stable[name] = old_rva
             continue
+        old_node = old_nodes.get(old_rva)
+        if not old_node:
+            unresolved[name] = old_rva
+            continue
+        scored = score_candidates(old_rva, old_node, new_nodes, indexes, args.lines_ratio)
+        if not scored:
+            unresolved[name] = old_rva
+            continue
+        best_score, _, best_rva = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        if best_score >= args.threshold and best_score - runner_up >= args.margin:
+            matched[name] = best_rva
+        else:
+            unresolved[name] = old_rva
 
-        old_clean = old_rva.replace('ull', '').replace('ULL', '')
-        if not old_clean.startswith('0x'):
-            old_clean = f"0x{old_clean}"
+    entries = {}
+    entries.update(stable)
+    entries.update(matched)
+    write_js(args.out, entries)
 
-        if old_clean in new_nodes:
-            if validate_stage1_alignment(old_clean) and validate_stage2_graph_consistency(old_clean, new_nodes):
-                results[name] = old_clean
-                continue
+    if args.out_md:
+        write_md(args.out_md, os.path.basename(args.new_index), stable, matched, unresolved, targets)
 
-        best_cand = None
-        for cand_rva, cand_node in new_nodes.items():
-            if cand_node.get("vtable") and "vtable" in name.lower():
-                vt_rva = hex(int(cand_node["vtable"], 16) - 0x100000000 if int(cand_node["vtable"], 16) >= 0x100000000 else int(cand_node["vtable"], 16))
-                if "character" in name.lower() and "ff3b9" in vt_rva:
-                    best_cand = vt_rva
-                    break
-                elif "projectile" in name.lower() and "ff3b1" in vt_rva:
-                    best_cand = vt_rva
-                    break
-                elif "character" not in name.lower() and "projectile" not in name.lower():
-                    best_cand = vt_rva
-                    break
+    print(f'[+] nodes new={len(new_nodes)} old={len(old_nodes)} requested={len(targets)} '
+          f'stable={len(stable)} matched={len(matched)} unresolved={len(unresolved)} -> {args.out}')
 
-        if not best_cand:
-            best_cand = old_clean
-
-        if validate_stage1_alignment(best_cand) and validate_stage2_graph_consistency(best_cand, new_nodes):
-            results[name] = best_cand
-
-    with open(args.out, 'w', encoding='utf-8') as f:
-        f.write("export const offsets = Object.freeze(\n{\n")
-        for k, v in results.items():
-            f.write(f"    {k}: {v},\n")
-        f.write("});\n")
 
 if __name__ == '__main__':
     main()
