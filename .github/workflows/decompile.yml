@@ -35,7 +35,7 @@ on:
       - 'tools/**'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: decompile-${{ github.ref }}
@@ -113,21 +113,38 @@ jobs:
           restore-keys: |
             decompile-${{ env.BIN_HASH }}-
 
-      - if: steps.decompile-cache.outputs.cache-hit != 'true'
+      - id: state
+        run: |
+          proj=missing
+          code=missing
+          if [ -s r2proj ]; then proj=ready; fi
+          if [ -s decompiled.c ]; then code=ready; fi
+          echo "proj=$proj" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "cache project=$proj dump=$code"
+
+      - if: ${{ steps.state.outputs.proj != 'ready' || steps.state.outputs.code != 'ready' }}
         run: bash tools/r2setup.sh
 
-      - if: steps.decompile-cache.outputs.cache-hit != 'true'
+      - if: ${{ steps.state.outputs.proj != 'ready' }}
         env:
           PHASE: analyze
           BUDGET: ${{ inputs.seconds || '18000' }}
         run: bash tools/decomp.sh
 
-      - if: steps.decompile-cache.outputs.cache-hit != 'true'
+      - if: ${{ steps.state.outputs.code != 'ready' }}
         env:
           BUDGET: ${{ inputs.seconds || '18000' }}
         run: bash tools/decomp.sh
 
-      - if: ${{ inputs.extract_all != false }}
+      - if: always()
+        run: |
+          test -s decompiled.c
+          bodies=$(grep -c '^{$' decompiled.c || true)
+          echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
+          test "${bodies:-0}" -gt 0
+
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.extract_all }}
         run: |
           python3 tools/extract_all.py \
             --bin "$BIN" \
@@ -135,19 +152,19 @@ jobs:
             --out index_data \
             --ver "${{ needs.fetch.outputs.ver }}"
 
-      - if: ${{ inputs.fingerprint != false }}
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.fingerprint }}
         run: |
           python3 tools/fingerprint.py \
             --code decompiled.c \
             --out index_data/fingerprints.json
 
-      - if: ${{ inputs.reconstruct_classes != false }}
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.reconstruct_classes }}
         run: |
           python3 tools/class_reconstructor.py \
             --index_dir index_data \
             --out index_data/classes.json
 
-      - if: ${{ inputs.symbolize != false }}
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.symbolize }}
         run: |
           python3 tools/symbolize.py \
             --index_dir index_data \
@@ -158,19 +175,31 @@ jobs:
           python3 tools/diff_versions.py \
             --old_offsets "${{ inputs.diff_offsets_url }}" \
             --new_index index_data \
+            --out "offsets_${{ needs.fetch.outputs.ver }}.js" \
             --out_md Diffed_Offsets.md
 
       - if: always()
         run: |
+          count() {
+            if [ -s "$1" ]; then
+              jq '. | length' "$1" 2>/dev/null || echo "unreadable"
+            else
+              echo "missing"
+            fi
+          }
           {
             echo "### Dump & Indexing Summary (${{ needs.fetch.outputs.ver }})"
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Cache Hit | ${{ steps.decompile-cache.outputs.cache-hit == 'true' }} |"
-            echo "| Functions | $(jq '. | length' index_data/functions.json 2>/dev/null || echo 0) |"
-            echo "| Strings | $(jq '. | length' index_data/strings.json 2>/dev/null || echo 0) |"
-            echo "| Classes | $(jq '. | length' index_data/classes.json 2>/dev/null || echo 0) |"
-            echo "| Symbols | $(jq '. | length' symbols_out/symbols.json 2>/dev/null || echo 0) |"
+            echo "| Cached project | ${{ steps.state.outputs.proj }} |"
+            echo "| Cached dump | ${{ steps.state.outputs.code }} |"
+            echo "| decompiled.c | $(wc -c < decompiled.c 2>/dev/null | tr -d ' ' || echo 0) bytes |"
+            echo "| Function bodies | $(grep -c '^{$' decompiled.c 2>/dev/null || echo 0) |"
+            echo "| Functions | $(count index_data/functions.json) |"
+            echo "| Strings | $(count index_data/strings.json) |"
+            echo "| Classes | $(count index_data/classes.json) |"
+            echo "| Symbols | $(count symbols_out/symbols.json) |"
             if [ -f Diffed_Offsets.md ]; then
               echo "### 🎯 Auto Diffed Offsets"
               cat Diffed_Offsets.md
@@ -185,6 +214,7 @@ jobs:
             index_data/
             symbols_out/
             Diffed_Offsets.md
+            offsets_*.js
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
