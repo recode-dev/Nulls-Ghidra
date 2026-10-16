@@ -102,6 +102,11 @@ jobs:
             --bin "$BIN" \
             --code decompiled.c \
             --out index_data \
+
+      - run: |
+          python3 tools/fingerprint.py \
+            --code decompiled.c \
+            --out index_data/fingerprints.json
             --ver "${{ needs.fetch.outputs.ver }}"
 
       - if: always()
