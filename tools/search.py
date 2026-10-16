@@ -10,6 +10,7 @@ def parse_args():
     p.add_argument('--str', help='Search string')
     p.add_argument('--field', help='Search field offset (e.g. 0x1d0)')
     p.add_argument('--const', help='Search constant (e.g. 0x7fffffff)')
+    p.add_argument('--vt', help='Search vtable address (e.g. 0xff3b98)')
     p.add_argument('--fn', help='Inspect function offset (e.g. 0x7a60f4)')
     p.add_argument('--role', help='Filter by role (root_update_loop, leaf_math, etc.)')
     return p.parse_args()
@@ -20,6 +21,17 @@ def main():
     strings_file = os.path.join(args.index_dir, 'strings_xref.json')
     funcs_file = os.path.join(args.index_dir, 'functions.json')
     fingerprints_file = os.path.join(args.index_dir, 'fingerprints.json')
+    vtables_file = os.path.join(args.index_dir, 'vtables.json')
+
+    if args.vt:
+        if os.path.exists(vtables_file):
+            with open(vtables_file, 'r', encoding='utf-8') as f:
+                vt_data = json.load(f)
+            matches = {k: v for k, v in vt_data.items() if args.vt.lower() in k.lower()}
+            print(f"[*] Found {len(matches)} matching vtables:")
+            for vt, data in list(matches.items())[:20]:
+                print(f"  VTable {vt}: source={data.get('source')} ctors={data.get('ctors')} methods={len(data.get('methods', []))}")
+        return
 
     if args.str:
         if os.path.exists(strings_file):
