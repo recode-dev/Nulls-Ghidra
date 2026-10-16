@@ -2,7 +2,7 @@
 set -euo pipefail
 
 URL=${BINARY_URL:-}
-OUT=${OUT_BIN:-brawl_bin}
+OUT=${OUT_BIN:-binary}
 CACHE=${IPA_CACHE_DIR:-ipa_cache}
 VERFILE=${VERSION_FILE:-version.txt}
 
@@ -20,12 +20,12 @@ if [ -n "$URL" ]; then
   LOC=$URL
 else
   LOC=""
-  for SRC in https://dnull.xyz/latest_bs_i https://nulls.ee/bs_latest_i; do
+  for SRC in ${SOURCE_URLS:-}; do
     for _ in 1 2 3; do
       LOC=$(loc_redirect "$SRC" || true)
-      case "$LOC" in *.ipa) break ;; esac
+      case "$LOC" in *.ipa|*.apk|*.zip) break ;; esac
       LOC=$(loc_page "$SRC" || true)
-      case "$LOC" in *.ipa) break ;; esac
+      case "$LOC" in *.ipa|*.apk|*.zip) break ;; esac
       LOC=""
       sleep 5
     done
@@ -33,10 +33,10 @@ else
     echo "resolve failed $SRC"
   done
 fi
-[ -n "$LOC" ] || { echo "no ipa url; set BINARY_URL"; exit 1; }
+[ -n "$LOC" ] || { echo "no archive url; pass BINARY_URL or SOURCE_URLS"; exit 1; }
 
-VER=$(basename "$LOC" | sed -E 's/.*nb_([0-9][0-9.]*)_.*/\1/')
-case "$VER" in *.ipa|*/*|"") VER=unknown ;; esac
+VER=$(basename "$LOC" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+[ -n "$VER" ] || VER=unknown
 echo "ipa $LOC"
 echo "ver $VER"
 echo "$VER" > "$VERFILE"
@@ -47,9 +47,9 @@ fi
 [ "${RESOLVE_ONLY:-0}" = 1 ] && exit 0
 
 mkdir -p "$CACHE"
-if [ ! -s "$CACHE/bs.ipa" ]; then
+if [ ! -s "$CACHE/archive" ]; then
   if ! curl -fL --retry 5 --retry-delay 5 --retry-all-errors --max-time 1800 -A "Mozilla/5.0" \
-    -o "$CACHE/bs.ipa" "$LOC"; then
+    -o "$CACHE/archive" "$LOC"; then
     echo "download failed $LOC"
     exit 1
   fi
@@ -58,36 +58,43 @@ fi
 WORK=${EXTRACT_DIR:-extract}
 rm -rf "$WORK"
 mkdir -p "$WORK"
-unzip -oq "$CACHE/bs.ipa" -d "$WORK"
+unzip -oq "$CACHE/archive" -d "$WORK"
 
-APP=$(find "$WORK/Payload" -maxdepth 1 -type d -name '*.app' | head -1)
-[ -n "$APP" ] || { echo "no app bundle"; exit 1; }
-echo "app $APP"
+ROOT="$WORK"
+APP=$(find "$WORK/Payload" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -1 || true)
+if [ -n "$APP" ]; then
+  ROOT="$APP"
+  echo "app $APP"
+fi
 
-find "$APP" -type f > /tmp/cand.txt
-: > /tmp/macho.txt
+CANDS="$WORK/candidates.txt"
+BINARIES="$WORK/binaries.txt"
+find "$ROOT" -type f > "$CANDS"
+: > "$BINARIES"
 while IFS= read -r f; do
   case "$f" in
-    *.png|*.jpg|*.jpeg|*.plist|*.car|*.ttf|*.otf|*.json|*.txt|*.gz|*.zip|*.mp3|*.wav|*.mp4|*.assets|*.resource|*.bundle|*.unity3d) continue ;;
+    *.png|*.jpg|*.jpeg|*.plist|*.car|*.ttf|*.otf|*.json|*.txt|*.gz|*.zip|*.mp3|*.wav|*.mp4|*.assets|*.resource|*.bundle|*.unity3d|*.dex|*.xml) continue ;;
   esac
-  file "$f" 2>/dev/null | grep -q Mach-O || continue
-  echo "$(wc -c < "$f" | tr -d ' ') $f" >> /tmp/macho.txt
-done < /tmp/cand.txt
-sort -rn /tmp/macho.txt 2>/dev/null | head -5
+  DESC=$(file -b "$f" 2>/dev/null || true)
+  case "$DESC" in
+    *Mach-O*|*ELF*) echo "$(wc -c < "$f" | tr -d ' ') $f" >> "$BINARIES" ;;
+  esac
+done < "$CANDS"
+sort -rn "$BINARIES" 2>/dev/null | head -5
 
 EXEC=""
-if [ -f "$APP/Info.plist" ]; then
-  EXEC=$(python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable','') or '')" "$APP/Info.plist" 2>/dev/null || true)
+if [ -f "$ROOT/Info.plist" ]; then
+  EXEC=$(python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable','') or '')" "$ROOT/Info.plist" 2>/dev/null || true)
 fi
 
 rm -f "$OUT"
 PICK=""
-if [ -n "$EXEC" ] && [ -f "$APP/$EXEC" ] && file "$APP/$EXEC" 2>/dev/null | grep -q Mach-O; then
-  PICK="$APP/$EXEC"
+if [ -n "$EXEC" ] && [ -f "$ROOT/$EXEC" ] && file -b "$ROOT/$EXEC" 2>/dev/null | grep -qE 'Mach-O|ELF'; then
+  PICK="$ROOT/$EXEC"
   echo "pick exec $EXEC"
-elif [ -s /tmp/macho.txt ]; then
-  PICK=$(sort -rn /tmp/macho.txt | head -1 | cut -d' ' -f2-)
-  echo "pick largest mach-o"
+elif [ -s "$BINARIES" ]; then
+  PICK=$(sort -rn "$BINARIES" | head -1 | cut -d' ' -f2-)
+  echo "pick largest binary"
 fi
 
 if [ -n "$PICK" ] && [ -f "$PICK" ]; then

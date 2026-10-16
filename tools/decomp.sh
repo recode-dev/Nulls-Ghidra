@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-BIN=${BIN:-brawl_bin}
+BIN=${BIN:-binary}
 BUDGET=${BUDGET:-18000}
 PHASE=${PHASE:-all}
 PROJ=${R2PROJ:-r2proj}
@@ -32,38 +32,13 @@ kill_at() {
 AE=0
 if [ -f .ae ]; then AE=$(cat .ae); fi
 
-json_r2() {
-  [ -f "$HERE/json2r2.py" ] || return 0
-  python3 "$HERE/json2r2.py" symbols "$BIN" 2>/dev/null
-}
-
-pat_r2() {
-  if [ ! -d patterns ]; then return 0; fi
-  [ -f "$HERE/patmatch.py" ] || return 0
-  local fs
-  fs=$(find patterns -name '*.md' | sort)
-  if [ -z "$fs" ]; then return 0; fi
-  printf '%s\n' "$fs" | while IFS= read -r f; do cat "$f"; done > p_all.md
-  if [ -f "$PROJ" ]; then
-    "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c 'afl~[0]' "$BIN" > starts.txt 2>/dev/null
-  fi
-  python3 "$HERE/patmatch.py" p_all.md "$BIN" --starts starts.txt \
-    --out-dir pat_out --emit-patterns pat_out/new.md 2>&1 | tail -2
-  if [ -f pat_out/renames.r2 ]; then cat pat_out/renames.r2; fi
-  return 0
-}
-
 if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
   if [ -f "$PROJ" ]; then
     echo "project cached"
   else
     AM=$((BUDGET / 3))
-    : > pre.r2
-    json_r2 >> pre.r2
-    PRE=()
-    if [ -s pre.r2 ]; then PRE=(-i "$PWD/pre.r2"); fi
     S=$(date +%s)
-    kill_at "$AM" "$R2" "${O[@]}" -q ${PRE[@]+"${PRE[@]}"} -c aaa \
+    kill_at "$AM" "$R2" "${O[@]}" -q -c aaa \
       -c "Ps $PWD/$PROJ" "$BIN" > analyze.log 2>&1
     AE=$(( $(date +%s) - S ))
     echo "$AE" > .ae
@@ -76,16 +51,8 @@ if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
 fi
 [ "$PHASE" = analyze ] && exit 0
 
-: > renames.r2
-pat_r2 >> renames.r2
-json_r2 >> renames.r2
-RN=()
-if [ -s renames.r2 ]; then RN=(-i "$PWD/renames.r2"); fi
-NR=$(( $(grep -c . renames.r2 || true) / 2 ))
-echo "renames $NR"
-
 if [ -f "$PROJ" ]; then
-  "$R2" "${O[@]}" -q -p "$PWD/$PROJ" ${RN[@]+"${RN[@]}"} -c aflj "$BIN" > "$META" 2>/dev/null
+  "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c aflj "$BIN" > "$META" 2>/dev/null
 fi
 
 rm -f "$CODE" "$LOG" "$ENG"
@@ -108,7 +75,7 @@ dump() {
   echo "dump start $c budget ${b}s"
   watch "$b" "$out" &
   local w=$!
-  kill_at "$b" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c "$c" ${RN[@]+"${RN[@]}"} "$BIN" > "$out" 2>> "$LOG"
+  kill_at "$b" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c "$c" "$BIN" > "$out" 2>> "$LOG"
   local r=$?
   kill "$w" 2>/dev/null
   return $r
@@ -149,6 +116,5 @@ EL=$(( $(date +%s) - S ))
   echo "bin_bytes=$(wc -c < "$BIN" | tr -d ' ')"
   echo "code_bytes=$(wc -c < "$CODE" | tr -d ' ')"
   echo "code_lines=$(wc -l < "$CODE" | tr -d ' ')"
-  echo "renames=$NR"
 } > "$ENG"
 cat "$ENG"
