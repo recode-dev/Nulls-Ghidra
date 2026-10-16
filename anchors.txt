@@ -1,9 +1,0 @@
-# якоря, которые обязаны находиться в новой сборке (имя или id из patterns/<версия>.json.gz)
-# пустой/отсутствующий файл = проверка пропускается
-
-Channel::setPriority
-Channel::getPosition
-Channel::getChannelGroup
-Channel::getCurrentSound
-Channel::getIndex
-Channel::getLoopPoints
