@@ -10,7 +10,7 @@ def parse_args():
     p.add_argument('--old_index', required=True)
     p.add_argument('--new_index', required=True)
     p.add_argument('--out_md', default='New_Offsets.md')
-    p.add_argument('--threshold', type=float, default=0.6)
+    p.add_argument('--threshold', type=float, default=0.55)
     return p.parse_args()
 
 def parse_offsets_md(path):
@@ -22,40 +22,6 @@ def parse_offsets_md(path):
                 offsets[m.group(1)] = m.group(2).lower()
     return offsets
 
-def compute_similarity(f1, f2, sx1_map, sx2_map):
-    score = 0.0
-    weight = 0.0
-
-    s1 = set(f1.get('strings', []))
-    s2 = set(f2.get('strings', []))
-    if s1 or s2:
-        jaccard_str = len(s1.intersection(s2)) / max(1, len(s1.union(s2)))
-        score += jaccard_str * 0.5
-        weight += 0.5
-
-    calls1 = set(f1.get('calls', []))
-    calls2 = set(f2.get('calls', []))
-    if calls1 or calls2:
-        ratio_calls = min(len(calls1), len(calls2)) / max(1, max(len(calls1), len(calls2)))
-        score += ratio_calls * 0.2
-        weight += 0.2
-
-    callers1 = set(f1.get('callers', []))
-    callers2 = set(f2.get('callers', []))
-    if callers1 or callers2:
-        ratio_callers = min(len(callers1), len(callers2)) / max(1, max(len(callers1), len(callers2)))
-        score += ratio_callers * 0.15
-        weight += 0.15
-
-    sz1 = f1.get('size_chars', 0)
-    sz2 = f2.get('size_chars', 0)
-    if sz1 and sz2:
-        ratio_sz = min(sz1, sz2) / max(sz1, sz2)
-        score += ratio_sz * 0.15
-        weight += 0.15
-
-    return score / weight if weight > 0 else 0.0
-
 def main():
     args = parse_args()
 
@@ -66,25 +32,94 @@ def main():
     with open(os.path.join(args.new_index, 'functions.json'), 'r') as f:
         new_fn = json.load(f)
 
+    old_fp_p = os.path.join(args.old_index, 'fingerprints.json')
+    new_fp_p = os.path.join(args.new_index, 'fingerprints.json')
+
+    old_fp = json.load(open(old_fp_p)) if os.path.exists(old_fp_p) else {}
+    new_fp = json.load(open(new_fp_p)) if os.path.exists(new_fp_p) else {}
+
     results = {}
+    matched_mapping = {}
 
     for name, old_addr in old_offs.items():
+        if old_addr not in old_fn:
+            continue
+        old_meta = old_fn[old_addr]
+        old_strs = set(old_meta.get('strings', []))
+        if old_strs:
+            best_cand = None
+            best_overlap = 0
+            for new_addr, new_meta in new_fn.items():
+                overlap = len(old_strs.intersection(set(new_meta.get('strings', []))))
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_cand = new_addr
+            if best_cand and best_overlap >= min(1, len(old_strs)):
+                results[name] = best_cand
+                matched_mapping[old_addr] = best_cand
+
+    for name, old_addr in old_offs.items():
+        if name in results:
+            continue
         if old_addr not in old_fn:
             results[name] = "0x0"
             continue
 
-        target_meta = old_fn[old_addr]
-        best_match = None
+        old_meta = old_fn[old_addr]
+        old_fprint = old_fp.get(old_addr, {})
+        old_fields = set(old_fprint.get('fields_accessed', []))
+        old_consts = set(old_fprint.get('math_constants', []))
+
+        best_cand = None
         best_score = 0.0
 
-        for new_addr, cand_meta in new_fn.items():
-            sim = compute_similarity(target_meta, cand_meta, None, None)
-            if sim > best_score:
-                best_score = sim
-                best_match = new_addr
+        for new_addr, new_meta in new_fn.items():
+            score = 0.0
+            weight = 0.0
+
+            old_callers = set(old_meta.get('callers', []))
+            new_callers = set(new_meta.get('callers', []))
+            propagated_callers = sum(1 for c in old_callers if matched_mapping.get(c) in new_callers)
+            if old_callers:
+                score += (propagated_callers / len(old_callers)) * 0.4
+                weight += 0.4
+
+            old_calls = set(old_meta.get('calls', []))
+            new_calls = set(new_meta.get('calls', []))
+            propagated_calls = sum(1 for c in old_calls if matched_mapping.get(c) in new_calls)
+            if old_calls:
+                score += (propagated_calls / len(old_calls)) * 0.3
+                weight += 0.3
+
+            new_fprint = new_fp.get(new_addr, {})
+            new_fields = set(new_fprint.get('fields_accessed', []))
+            new_consts = set(new_fprint.get('math_constants', []))
+
+            if old_fields or new_fields:
+                f_sim = len(old_fields.intersection(new_fields)) / max(1, len(old_fields.union(new_fields)))
+                score += f_sim * 0.2
+                weight += 0.2
+
+            if old_consts or new_consts:
+                c_sim = len(old_consts.intersection(new_consts)) / max(1, len(old_consts.union(new_consts)))
+                score += c_sim * 0.1
+                weight += 0.1
+
+            sz1 = old_meta.get('size_chars', 0)
+            sz2 = new_meta.get('size_chars', 0)
+            if sz1 and sz2:
+                sz_sim = min(sz1, sz2) / max(sz1, sz2)
+                score += sz_sim * 0.1
+                weight += 0.1
+
+            final_sim = score / weight if weight > 0 else 0.0
+            if final_sim > best_score:
+                best_score = final_sim
+                best_cand = new_addr
 
         if best_score >= args.threshold:
-            results[name] = best_match
+            results[name] = best_cand
+            matched_mapping[old_addr] = best_cand
         else:
             results[name] = "0x0"
 
