@@ -13,15 +13,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/decompile.yml'
-      - 'tools/fetch.sh'
-      - 'tools/r2setup.sh'
-      - 'tools/decomp.sh'
-      - 'tools/split.py'
-      - 'tools/json2r2.py'
-      - 'tools/patmatch.py'
-      - 'tools/mksym.py'
-      - 'symbols/**'
-      - 'patterns/**'
+      - 'tools/**'
 
 permissions:
   contents: write
@@ -69,23 +61,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: symbols
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p symbols
-          RUN=$(gh run list -R "${{ github.repository }}" -w patterns -s success -L 1 --json databaseId -q '.[0].databaseId' || true)
-          if [ -n "$RUN" ]; then
-            if gh run download "$RUN" -R "${{ github.repository }}" -n symbols -D /tmp/sym; then
-              cp -f /tmp/sym/*.json symbols/ || true
-            else
-              echo "no symbols artifact in run $RUN"
-            fi
-          else
-            echo "no successful patterns run"
-          fi
-          ls -l symbols
-
       - run: bash tools/r2setup.sh
 
       - uses: actions/download-artifact@v4
@@ -124,56 +99,37 @@ jobs:
         run: bash tools/decomp.sh
 
       - run: |
-          python3 tools/split.py \
+          python3 tools/extract_all.py \
+            --bin "$BIN" \
             --code decompiled.c \
-            --funcs functions.json \
-            --engine engine.txt \
-            --out decompiled \
+            --out index_data \
             --ver "${{ needs.fetch.outputs.ver }}"
 
       - run: |
-          set -euo pipefail
-          N=$(find decompiled/src -name '0x*.c' | wc -l | tr -d ' ')
-          echo "funcs $N"
-          test "$N" -gt 0
+          python3 tools/split.py \
+            --code decompiled.c \
+            --funcs index_data/functions.json \
+            --out decompiled \
+            --ver "${{ needs.fetch.outputs.ver }}"
 
       - if: always()
         run: |
           {
-            echo "| key | value |"
+            echo "### Dump Complete (${{ needs.fetch.outputs.ver }})"
+            echo "| Metric | Value |"
             echo "|---|---|"
-            sed 's/^/| /; s/=/ | /; s/$/ |/' engine.txt 2>/dev/null
-            echo "| funcs | $(find decompiled/src -name '0x*.c' 2>/dev/null | wc -l | tr -d ' ') |"
+            echo "| Total Functions | $(jq '. | length' index_data/functions.json 2>/dev/null || echo 0) |"
+            echo "| Total Strings | $(jq '. | length' index_data/strings.json 2>/dev/null || echo 0) |"
+            echo "| Total VTables | $(jq '. | length' index_data/vtables.json 2>/dev/null || echo 0) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: decompiled-${{ needs.fetch.outputs.ver }}
+          name: full-dump-${{ needs.fetch.outputs.ver }}
           path: |
+            index_data/
             decompiled/
             decompiled.c
-            engine.txt
-            r2.log
-            analyze.log
-            functions.json
-            renames.r2
-            pat_out/
           retention-days: 30
           if-no-files-found: warn
-
-      - name: push
-        if: always()
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@users.noreply.github.com
-          V="${{ needs.fetch.outputs.ver }}"
-          mkdir -p symbols
-          if [ -s engine.txt ]; then cp engine.txt "symbols/$V.engine.txt"; fi
-          if [ -s "symbols/$V.json" ]; then
-            python3 tools/mksym.py --merge "symbols/$V.json" --ver "$V" --out "symbols/$V.json"
-          fi
-          git add symbols
-          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
-          git commit -m "symbols: $V from decompile [skip ci]"
-          git push
