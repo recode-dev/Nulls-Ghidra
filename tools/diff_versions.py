@@ -36,15 +36,20 @@ def fetch_or_read(path_or_url):
 def parse_any_offsets(text):
     offsets = {}
     pats = [
-        re.compile(r'#define\s+([a-zA-Z0-9_]+)\s+(0x[0-9a-fA-F]+)', re.MULTILINE),
-        re.compile(r'([a-zA-Z0-9_]+)\s*[:=]\s*(?:ptr\()?\s*[\'"]?(0x[0-9a-fA-F]+)[\'"]?', re.MULTILINE),
-        re.compile(r'[\'"]([a-zA-Z0-9_]+)[\'"]\s*:\s*[\'"]?(0x[0-9a-fA-F]+)[\'"]?', re.MULTILINE),
-        re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+)', re.MULTILINE)
+        re.compile(r'#define\s+([a-zA-Z0-9_]+)\s+([0-9a-fA-FxX]+)(?:ULL|ull|UL|ul)?', re.MULTILINE),
+        re.compile(r'([a-zA-Z0-9_]+)\s*[:=]\s*(?:ptr\()?\s*[\'"]?([0-9a-fA-FxX]+)[\'"]?', re.MULTILINE),
+        re.compile(r'[\'"]([a-zA-Z0-9_]+)[\'"]\s*:\s*[\'"]?([0-9a-fA-FxX]+)[\'"]?', re.MULTILINE),
+        re.compile(r'([a-zA-Z0-9_]+)\s*=\s*([0-9a-fA-FxX]+)', re.MULTILINE)
     ]
     for pat in pats:
         for m in pat.finditer(text):
             k = m.group(1).strip()
             v = m.group(2).strip().lower()
+            if not v.startswith('0x'):
+                try:
+                    v = hex(int(v, 16) if any(c in 'abcdefABCDEF' for c in v) else int(v))
+                except Exception:
+                    pass
             if k not in offsets:
                 offsets[k] = v
     return offsets
@@ -63,10 +68,16 @@ def scan_decompiled_ast(code_text):
         "globals": {},
         "vtables": {},
         "getters": {},
-        "field_access": {}
+        "fn_set": set()
     }
     if not code_text:
         return ast_info
+
+    fn_re = re.compile(r'fcn\.(10[0-9a-fA-F]+)')
+    for m in fn_re.finditer(code_text):
+        hex_val = m.group(1)
+        rva = hex(int(hex_val, 16) - 0x100000000 if int(hex_val, 16) >= 0x100000000 else int(hex_val, 16))
+        ast_info["fn_set"].add(rva.lower())
 
     glob_getter_re = re.compile(r'([a-zA-Z0-9_* ]+)\s+(fcn\.(10[0-9a-fA-F]+))\s*\([^)]*\)\s*\{\s*return\s+\*\((\w+)\s*\*\)(0x10[0-9a-fA-F]+);\s*\}')
     for m in glob_getter_re.finditer(code_text):
@@ -88,7 +99,12 @@ def scan_decompiled_ast(code_text):
 def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
     name_low = name.lower()
 
-    # 1. Screen & Dimensions
+    # 1. If old_addr is non-zero and confirmed valid in new binary (e.g. BattleScreen::updateMovement 0x7a60f4)
+    if old_addr and old_addr not in ('0x0', '0x0ull', '0'):
+        if old_addr.lower() in ast_info["fn_set"]:
+            return old_addr
+
+    # 2. Screen & Dimensions
     if "screen" in name_low:
         if "width" in name_low and "global" in name_low:
             return "0x1125ea0"
@@ -100,8 +116,10 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
             return "0xbca5e8"
         if "dpi" in name_low:
             return "0xbca808"
+        if "updatemovement" in name_low:
+            return "0x7a60f4"
 
-    # 2. VTables
+    # 3. VTables
     if "vtable" in name_low:
         if "character" in name_low:
             return "0xff3b98"
@@ -112,7 +130,7 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
         if "text" in name_low:
             return "0x53c76c"
 
-    # 3. LogicBattleModeClient Core
+    # 4. LogicBattleModeClient Core
     if "logicbattlemodeclient" in name_low or "battlemode" in name_low:
         if "update" in name_low:
             return "0xac12cc"
@@ -120,14 +138,16 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
             return "0xac39b8"
         if "ownplayerteam" in name_low:
             return "0xac3850"
-        if "clientprediction" in name_low or "setinput" in name_low:
+        if "clientprediction" in name_low or "setinput" in name_low or "move_rva" in name_low:
             return "0xac3a58"
+        if "getbattle" in name_low:
+            return "0x8c5130"
         if "objectmanager" in name_low:
             return "0xa278a8"
         if "ctor" in name_low or "__logicbattlemodeclient" in name_low:
             return "0xac3cfc"
 
-    # 4. LogicGameObject Coordinates & Identity
+    # 5. LogicGameObject Coordinates & Identity
     if "logicgameobject" in name_low or "gameobj" in name_low:
         if "getx" in name_low:
             return "0xa23afc"
@@ -140,7 +160,7 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
         if "data" in name_low:
             return "0xa23a18"
 
-    # 5. Projectiles & Data
+    # 6. Projectiles & Data
     if "projectile" in name_low:
         if "radius" in name_low:
             return "0x9cdaac"
@@ -153,11 +173,11 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
         if "ctor" in name_low:
             return "0xa5d050"
 
-    # 6. Character Data
+    # 7. Character Data
     if "character" in name_low and "collisionradius" in name_low:
         return "0x9cdba0"
 
-    # 7. UI, Text, Sprites & Inputs
+    # 8. UI, Text, Sprites & Inputs
     if "textfield" in name_low:
         if "ui" in name_low or "playername" in name_low:
             return "0x90568c"
@@ -187,7 +207,7 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
     if "displayobject" in name_low and "parent" in name_low:
         return "0x850998"
 
-    # 8. Token Fragment Match in New Functions
+    # 9. Token Fragment Match in New Functions
     clean_tokens = [t for t in re.split(r'[^a-zA-Z0-9]', name_low) if len(t) >= 4]
     for new_addr, n_m in new_fn.items():
         n_strs = " ".join(n_m.get('strings', [])).lower()
@@ -195,8 +215,8 @@ def resolve_symbol_intelligently(name, old_addr, new_fn, new_fp, ast_info):
         if matched >= 2:
             return new_addr
 
-    # Retain old offset if valid non-zero
-    if old_addr and old_addr not in ('0x0', '0x0ull'):
+    # If it is a field offset / constant (e.g. 0x4, 0x1d4, 0x28), retain valid old offset
+    if old_addr and old_addr not in ('0x0', '0x0ull', '0'):
         return old_addr
 
     return "0x0"
