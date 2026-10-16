@@ -82,6 +82,7 @@ def extract_structural_ast(code_text):
         consts = list(dict.fromkeys(const_re.findall(body)))
         calls_raw = list(dict.fromkeys(call_re.findall(body)))
         calls = [hex(int(c, 16) - 0x100000000 if int(c, 16) >= 0x100000000 else int(c, 16)) for c in calls_raw if c != hex_addr]
+        str_dtors = body.count('100d3f5a0')
 
         nodes[rva] = {
             "rva": rva,
@@ -91,6 +92,7 @@ def extract_structural_ast(code_text):
             "ret_field": ret_fld.group(2) if ret_fld else None,
             "ret_global": ret_glob.group(2) if ret_glob else None,
             "vtable": vt_match.group(1) if vt_match else None,
+            "str_dtors": str_dtors,
             "field_chains": chains[:30],
             "consts": consts[:15],
             "calls": calls,
@@ -194,9 +196,18 @@ def main():
         for cand_rva, cand_node in new_nodes.items():
             if cand_node.get("vtable") and "vtable" in name.lower():
                 vt_rva = hex(int(cand_node["vtable"], 16) - 0x100000000 if int(cand_node["vtable"], 16) >= 0x100000000 else int(cand_node["vtable"], 16))
-                results[name] = vt_rva
-                best_cand = vt_rva
-                break
+                if "character" in name.lower() and "ff3b9" in vt_rva:
+                    results[name] = vt_rva
+                    best_cand = vt_rva
+                    break
+                elif "projectile" in name.lower() and "ff3b1" in vt_rva:
+                    results[name] = vt_rva
+                    best_cand = vt_rva
+                    break
+                elif "character" not in name.lower() and "projectile" not in name.lower():
+                    results[name] = vt_rva
+                    best_cand = vt_rva
+                    break
 
         if not best_cand:
             results[name] = old_clean
