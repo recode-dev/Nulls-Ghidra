@@ -9,14 +9,16 @@ import subprocess
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--bin', required=True, help='Binary path')
-    p.add_argument('--code', required=True, help='decompiled.c path')
-    p.add_argument('--out', default='index_data', help='Output directory')
-    p.add_argument('--ver', default='unknown', help='Version')
+    p.add_argument('--bin', required=True)
+    p.add_argument('--code', required=True)
+    p.add_argument('--out', default='index_data')
+    p.add_argument('--ver', default='unknown')
     return p.parse_args()
 
 def extract_strings_from_bin(bin_path):
     strings_map = {}
+    if not os.path.exists(bin_path):
+        return strings_map
     try:
         out = subprocess.check_output(['strings', '-a', '-t', 'x', bin_path], stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
         for line in out.splitlines():
@@ -34,29 +36,28 @@ def extract_code_metadata(code_path):
         text = f.read()
 
     fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+(fcn\.(100[0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n\{', re.MULTILINE)
-    raw_defs = []
-    for m in fn_pattern.finditer(text):
-        ret = m.group(1).strip()
-        addr_hex = m.group(3)
-        args = m.group(4).strip()
-        offset = int(addr_hex, 16) - 0x100000000
-        raw_defs.append((offset, addr_hex, ret, args, m.start()))
+    matches = list(fn_pattern.finditer(text))
 
-    raw_defs.sort(key=lambda x: x[0])
+    str_re = re.compile(r'\"([^\"]{2,120})\"')
+    call_re = re.compile(r'fcn\.(100[0-9a-fA-F]+)')
 
     funcs_data = {}
     strings_xref = {}
 
-    for i in range(len(raw_defs)):
-        offset, addr_hex, ret, args, start_pos = raw_defs[i]
-        end_pos = raw_defs[i + 1][4] if i + 1 < len(raw_defs) else len(text)
+    for i in range(len(matches)):
+        m = matches[i]
+        ret = m.group(1).strip()
+        addr_hex = m.group(3)
+        args = m.group(4).strip()
+        offset = int(addr_hex, 16) - 0x100000000
+
+        start_pos = m.start()
+        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[start_pos:end_pos]
 
-        strs = list(set(re.findall(r'\"([^\"]{2,150})\"', body)))
-        called_raw = list(set(re.findall(r'fcn\.(100[0-9a-fA-F]+)', body)))
+        strs = list(set(str_re.findall(body)))
+        called_raw = list(set(call_re.findall(body)))
         calls = [f"0x{int(a, 16) - 0x100000000:x}" for a in called_raw if a != addr_hex]
-
-        consts = list(set(re.findall(r'0x[0-9a-fA-F]{3,16}', body)))
 
         off_str = f"0x{offset:x}"
         funcs_data[off_str] = {
@@ -65,11 +66,9 @@ def extract_code_metadata(code_path):
             "return_type": ret,
             "args": args,
             "size_chars": len(body),
-            "line_count": len(body.splitlines()),
             "strings": strs,
             "calls": calls,
-            "callers": [],
-            "constants": consts[:30]
+            "callers": []
         }
 
         for s in strs:
@@ -84,7 +83,7 @@ def extract_code_metadata(code_path):
 
     return funcs_data, strings_xref
 
-def extract_vtables(bin_path, funcs_data):
+def extract_vtables_fast(bin_path, funcs_data):
     vtables = {}
     if not os.path.exists(bin_path):
         return vtables
@@ -92,25 +91,27 @@ def extract_vtables(bin_path, funcs_data):
         with open(bin_path, 'rb') as f:
             data = f.read()
 
-        fn_offsets = {int(k, 16): k for k in funcs_data.keys()}
+        fn_offsets_set = {int(k, 16) for k in funcs_data.keys()}
         base = 0x100000000
-        ptr_size = 8
+
+        aligned_len = len(data) - (len(data) % 8)
+        unpacked = struct.iter_unpack('<Q', memoryview(data)[:aligned_len])
 
         consecutive = []
-        start_vtable = None
+        start_vtable = 0
+        curr_offset = 0
 
-        for off in range(0, len(data) - ptr_size, ptr_size):
-            val = struct.unpack('<Q', data[off:off+ptr_size])[0]
+        for (val,) in unpacked:
             val_off = val - base
-            if val_off in fn_offsets:
+            if val_off in fn_offsets_set:
                 if not consecutive:
-                    start_vtable = off
+                    start_vtable = curr_offset
                 consecutive.append(f"0x{val_off:x}")
             else:
                 if len(consecutive) >= 4:
                     vtables[f"0x{start_vtable:x}"] = consecutive
                 consecutive = []
-                start_vtable = None
+            curr_offset += 8
     except Exception:
         pass
     return vtables
@@ -121,19 +122,19 @@ def main():
 
     funcs_data, strings_xref = extract_code_metadata(args.code)
     bin_strings = extract_strings_from_bin(args.bin)
-    vtables = extract_vtables(args.bin, funcs_data)
+    vtables = extract_vtables_fast(args.bin, funcs_data)
 
     with open(os.path.join(args.out, 'functions.json'), 'w', encoding='utf-8') as f:
-        json.dump(funcs_data, f, ensure_ascii=False, indent=2)
+        json.dump(funcs_data, f, ensure_ascii=False)
 
     with open(os.path.join(args.out, 'strings_xref.json'), 'w', encoding='utf-8') as f:
-        json.dump(strings_xref, f, ensure_ascii=False, indent=2)
+        json.dump(strings_xref, f, ensure_ascii=False)
 
     with open(os.path.join(args.out, 'strings.json'), 'w', encoding='utf-8') as f:
-        json.dump(bin_strings, f, ensure_ascii=False, indent=2)
+        json.dump(bin_strings, f, ensure_ascii=False)
 
     with open(os.path.join(args.out, 'vtables.json'), 'w', encoding='utf-8') as f:
-        json.dump(vtables, f, ensure_ascii=False, indent=2)
+        json.dump(vtables, f, ensure_ascii=False)
 
     compact_ai_map = {}
     for off, meta in funcs_data.items():
@@ -146,7 +147,7 @@ def main():
             }
 
     with open(os.path.join(args.out, 'ai_compact_index.json'), 'w', encoding='utf-8') as f:
-        json.dump(compact_ai_map, f, ensure_ascii=False, indent=2)
+        json.dump(compact_ai_map, f, ensure_ascii=False)
 
 if __name__ == '__main__':
     main()

@@ -73,7 +73,6 @@ jobs:
           BIN=$(find bin -type f | head -1)
           test -s "$BIN"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
-          file "$BIN"
 
       - uses: actions/cache/restore@v4
         id: p
@@ -105,31 +104,23 @@ jobs:
             --out index_data \
             --ver "${{ needs.fetch.outputs.ver }}"
 
-      - run: |
-          python3 tools/split.py \
-            --code decompiled.c \
-            --funcs index_data/functions.json \
-            --out decompiled \
-            --ver "${{ needs.fetch.outputs.ver }}"
-
       - if: always()
         run: |
           {
-            echo "### Dump Complete (${{ needs.fetch.outputs.ver }})"
+            echo "### Complete (${{ needs.fetch.outputs.ver }})"
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Total Functions | $(jq '. | length' index_data/functions.json 2>/dev/null || echo 0) |"
-            echo "| Total Strings | $(jq '. | length' index_data/strings.json 2>/dev/null || echo 0) |"
-            echo "| Total VTables | $(jq '. | length' index_data/vtables.json 2>/dev/null || echo 0) |"
+            echo "| Functions | $(jq '. | length' index_data/functions.json 2>/dev/null || echo 0) |"
+            echo "| Strings | $(jq '. | length' index_data/strings.json 2>/dev/null || echo 0) |"
+            echo "| VTables | $(jq '. | length' index_data/vtables.json 2>/dev/null || echo 0) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: full-dump-${{ needs.fetch.outputs.ver }}
+          name: dump-${{ needs.fetch.outputs.ver }}
           path: |
             index_data/
-            decompiled/
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
