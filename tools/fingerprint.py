@@ -18,13 +18,14 @@ def main():
     with open(args.code, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
-    fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+(fcn\.(100[0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n\{', re.MULTILINE)
+    fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+(fcn\.(10[0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n\{', re.MULTILINE)
     matches = list(fn_pattern.finditer(text))
 
-    field_re = re.compile(r'(?:arg1|\bthis\b|puVar\d+|pvVar\d+)\s*(?:\+\s*|\-\>\s*|\.\s*)(0x[0-9a-fA-F]+|\d+)')
+    field_re = re.compile(r'\b(?:arg\w*|this|p\w*Var\d+|iVar\d+|uVar\d+|pvVar\d+|puVar\d+)\s*(?:\+\s*|\-\>\s*|\.\s*|\[\s*)(0x[0-9a-fA-F]+|\d+)')
+    ret_field_re = re.compile(r'return\s+\*\((\w+)\s*\*\)\(\w+\s*\+\s*(0x[0-9a-fA-F]+|\d+)\);')
     const_re = re.compile(r'\b(0x[0-9a-fA-F]{4,16})\b')
     float_re = re.compile(r'\b\d+\.\d+(?:f)?\b')
-    call_re = re.compile(r'fcn\.(100[0-9a-fA-F]+)')
+    call_re = re.compile(r'fcn\.(10[0-9a-fA-F]+)')
     loop_re = re.compile(r'\b(while|for|do)\b')
 
     fingerprints = {}
@@ -32,25 +33,30 @@ def main():
     for i in range(len(matches)):
         m = matches[i]
         addr_hex = m.group(3)
-        offset = int(addr_hex, 16) - 0x100000000
+        offset = int(addr_hex, 16) - 0x100000000 if int(addr_hex, 16) >= 0x100000000 else int(addr_hex, 16)
         off_str = f"0x{offset:x}"
 
         start_pos = m.start()
         end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[start_pos:end_pos]
 
-        fields = list(set(field_re.findall(body)))
-        consts = list(set(const_re.findall(body)))
-        floats = list(set(float_re.findall(body)))
+        ret_fld_m = ret_field_re.search(body)
+        ret_field = ret_fld_m.group(2) if ret_fld_m else None
+
+        fields = list(dict.fromkeys(field_re.findall(body)))
+        consts = list(dict.fromkeys(const_re.findall(body)))
+        floats = list(dict.fromkeys(float_re.findall(body)))
         loops_count = len(loop_re.findall(body))
-        calls_raw = list(set(call_re.findall(body)))
-        calls = [f"0x{int(a, 16) - 0x100000000:x}" for a in calls_raw if a != addr_hex]
+        calls_raw = list(dict.fromkeys(call_re.findall(body)))
+        calls = [f"0x{int(a, 16) - 0x100000000:x}" for a in calls_raw if int(a, 16) >= 0x100000000 and a != addr_hex]
 
         fingerprints[off_str] = {
             "offset": off_str,
+            "return_type": m.group(1).strip(),
             "size": len(body),
             "lines": len(body.splitlines()),
-            "fields_accessed": fields[:20],
+            "ret_field": ret_field,
+            "fields_accessed": fields[:25],
             "math_constants": consts[:15],
             "float_constants": floats[:15],
             "loops_count": loops_count,
@@ -64,11 +70,16 @@ def main():
                 fingerprints[callee]["callers"].append(caller_off)
 
     for off, d in fingerprints.items():
-        if len(d["callers"]) == 0 and d["lines"] > 50:
-            d["topology_role"] = "root_update_loop"
-        elif len(d["calls"]) == 0:
-            d["topology_role"] = "leaf_math"
-        elif len(d["callers"]) >= 15:
+        if len(d["calls"]) == 0 and d["lines"] <= 8:
+            if d.get("ret_field"):
+                d["topology_role"] = f"getter_field_{d['ret_field']}"
+            elif len(d["fields_accessed"]) >= 2:
+                d["topology_role"] = "setter_multi"
+            else:
+                d["topology_role"] = "leaf_math"
+        elif d["loops_count"] >= 2 and d["lines"] > 40:
+            d["topology_role"] = "update_loop"
+        elif len(d["callers"]) >= 20:
             d["topology_role"] = "shared_utility_hub"
         else:
             d["topology_role"] = "standard_method"
