@@ -57,6 +57,8 @@ def main():
 
     functions = []
     for match in FUNC_RE.finditer(text):
+        if not match.group(3):
+            continue
         try:
             functions.append((match.start(), int(match.group(3), 16)))
         except ValueError:

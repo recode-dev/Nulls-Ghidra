@@ -9,3 +9,6 @@ __pycache__/
 tmp/
 temp/
 index_data/
+imports.json
+names.r2
+.isj

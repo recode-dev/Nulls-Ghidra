@@ -16,6 +16,11 @@ FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
 )
 CALL_RE = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
+NAME_CALL_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(')
+VCALL_RE = re.compile(
+    r'\*\*\s*\(\s*code\s*\*\s*\*\s*\)\s*\(\s*\*?\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*'
+    r'(0x[0-9a-fA-F]+|\d+)\s*\)'
+)
 STR_RE = re.compile(r'"([^"]{2,200})"')
 PLUS_FIELD_RE = re.compile(r'\+\s*(0x[0-9a-fA-F]{1,6}|\d{1,6})\b')
 INDEX_FIELD_RE = re.compile(r'\[\s*(0x[0-9a-fA-F]{1,6}|\d{1,6})\s*\]')
@@ -41,6 +46,7 @@ def parse_args():
                    help='largest value treated as a struct field offset')
     p.add_argument('--min-string', type=int, default=4, help='shortest binary string to keep')
     p.add_argument('--unwind', default='', help='unwind.json path, defaults to <out>/unwind.json')
+    p.add_argument('--names', default='', help='symbol map {name: address} for renamed functions')
     return p.parse_args()
 
 
@@ -109,6 +115,7 @@ def make_stub(rva, address, section):
         'call_sites': {},
         'callers': [],
         'unresolved_calls': [],
+        'vcall_slots': [],
         'field_offsets': [],
         'field_writes': [],
         'consts': [],
@@ -269,20 +276,32 @@ def section_of(sections, address):
     return None
 
 
-def parse_code(code_path, base, image_size, max_field, sections, unwind_starts, prologue_starts=None):
+def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
+               prologue_starts=None, name_map=None):
     with open(code_path, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
-    matches = list(FUNC_RE.finditer(text))
+    name_map = name_map or {}
+    func_re = FUNC_RE
+    if name_map:
+        # only symbols we actually know: a loose pattern would eat 'else if (...) {'
+        names = '|'.join(sorted((re.escape(n) for n in name_map), key=len, reverse=True))
+        func_re = re.compile(
+            r'\n([A-Za-z0-9_* ]+?)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+)|(?:' + names + r'))'
+            r'\s*\(([^)]*)\)\s*\n?\s*\{'
+        )
+    matches = list(func_re.finditer(text))
     functions = {}
     strings_xref = {}
     data_refs = {}
 
     for i, m in enumerate(matches):
-        try:
+        if m.group(3):
             address = int(m.group(3), 16)
-        except ValueError:
-            continue
+        else:
+            address = name_map.get(m.group(2))
+            if address is None:
+                continue
         rva = address - base if address >= base else address
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[m.start():end]
@@ -297,6 +316,15 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts, 
             target = int(c, 16)
             target = target - base if target >= base else target
             call_sites[target] = call_sites.get(target, 0) + 1
+        if name_map:
+            for token in NAME_CALL_RE.findall(body[body.find('{'):]):
+                target = name_map.get(token)
+                if target is None:
+                    continue
+                target = target - base if target >= base else target
+                call_sites[target] = call_sites.get(target, 0) + 1
+        vcalls = sorted({to_int(t) for t in VCALL_RE.findall(body)} - {0})
+        vcalls = [v for v in vcalls if v < max_field]
 
         reads = set()
         writes = set()
@@ -345,6 +373,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts, 
             'call_sites': {f'0x{t:x}': n for t, n in sorted(call_sites.items())},
             'callers': [],
             'unresolved_calls': [],
+            'vcall_slots': vcalls,
             'field_offsets': sorted(reads | writes),
             'field_writes': sorted(writes),
             'consts': [f'0x{c:x}' for c in sorted(consts)],
@@ -423,6 +452,11 @@ def main():
     base = detect_base(args.bin)
     image_size = os.path.getsize(args.bin)
     sections = exec_sections(args.bin)
+    name_map = {}
+    names_path = args.names or ('imports.json' if os.path.exists('imports.json') else '')
+    if names_path and os.path.exists(names_path):
+        with open(names_path) as f:
+            name_map = {k: v for k, v in json.load(f).items() if isinstance(v, int)}
     unwind_path = args.unwind or os.path.join(args.out, 'unwind.json')
     unwind_starts = set()
     if os.path.exists(unwind_path):
@@ -480,7 +514,8 @@ def main():
 
     functions, strings_xref, data_refs, edges = parse_code(args.code, base, image_size,
                                                            args.max_field_offset, sections,
-                                                           unwind_starts, prologue_starts)
+                                                           unwind_starts, prologue_starts,
+                                                           name_map)
     for rva in thin_starts:
         entry = functions.get(f'0x{rva:x}')
         if entry:

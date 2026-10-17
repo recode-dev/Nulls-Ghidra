@@ -135,6 +135,7 @@ jobs:
           python3 tools/xrefs.py \
             --bin "$BIN" \
             --code decompiled.c \
+            --names imports.json \
             --out index_data
 
       - run: |
@@ -161,6 +162,15 @@ jobs:
           python3 tools/classes.py \
             --index_dir index_data \
             --out index_data/classes.json
+
+      - run: |
+          python3 - <<'PY'
+          import json
+          functions = len(json.load(open('index_data/functions.json')))
+          vtables = len(json.load(open('index_data/vtables.json')))
+          assert functions > 1000 and vtables > 0, (functions, vtables)
+          print(f'index ok: {functions} functions, {vtables} vtables')
+          PY
 
       - if: always()
         run: |
@@ -193,5 +203,6 @@ jobs:
             index_data/
             decompiled.c
             binary
+            imports.json
           retention-days: 30
           if-no-files-found: warn

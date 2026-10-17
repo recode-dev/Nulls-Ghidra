@@ -61,6 +61,8 @@ def macho_sections(data, offset=0):
             arch_off = struct.unpack_from('>I', data, offset + 8 + i * 20 + 8)[0]
             found = macho_sections(data, arch_off)
             if found:
+                for entry in found:
+                    entry['fileoff'] += arch_off
                 return found
         return []
     if magic != MH_MAGIC_64:

@@ -33,14 +33,29 @@ def class_fields(fps, methods):
 
 
 def flush(classes, cluster, fields):
-    if len(cluster) >= MIN_METHODS and len(fields) >= MIN_FIELDS:
-        key = f'ClusterClass_{cluster[0]}'
-        classes.setdefault(key, {
-            'vtable': None,
-            'methods_count': len(cluster),
-            'methods': list(cluster),
-            'fields': sorted(fields),
-        })
+    if len(cluster) < MIN_METHODS or len(fields) < MIN_FIELDS:
+        return
+    # fold the cluster into the vtable class it overlaps most, if any
+    best = None
+    for name, entry in classes.items():
+        if entry.get('vtable') is None:
+            continue
+        shared = len(fields.intersection(entry['fields']))
+        if shared >= MIN_FIELDS and shared * 2 >= len(fields) and (best is None or shared > best[1]):
+            best = (name, shared)
+    if best:
+        target = classes[best[0]]
+        target['methods'].extend(m for m in cluster if m not in target['methods'])
+        target['methods_count'] = len(target['methods'])
+        target['clusters'] = target.get('clusters', 0) + 1
+        return
+    key = f'ClusterClass_{cluster[0]}'
+    classes.setdefault(key, {
+        'vtable': None,
+        'methods_count': len(cluster),
+        'methods': list(cluster),
+        'fields': sorted(fields),
+    })
 
 
 def main():

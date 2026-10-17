@@ -39,6 +39,8 @@ def main():
 
     for i in range(len(matches)):
         m = matches[i]
+        if not m.group(3):
+            continue
         addr_hex = m.group(3)
         addr_value = int(addr_hex, 16)
         offset = addr_value - base if addr_value >= base else addr_value
