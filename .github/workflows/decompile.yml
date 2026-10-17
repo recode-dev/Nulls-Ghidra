@@ -18,6 +18,9 @@ on:
       diff_offsets_url:
         description: URL or raw text of a reference offsets map (C / JS / TS / JSON)
         default: ''
+      reference_url:
+        description: URL of a reference build (APK / IPA / zip / ELF or Mach-O) to decompile alongside the target
+        default: ''
       symbolize:
         description: generate IDA / Ghidra / radare2 symbol maps
         type: boolean
@@ -274,3 +277,53 @@ jobs:
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
+
+  ref_dump:
+    if: ${{ inputs.reference_url != '' }}
+    runs-on: macos-14
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: fetch reference build
+        env:
+          REF_URL: ${{ inputs.reference_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p ref_in
+          curl -fL --retry 3 -o ref_in/download "$REF_URL"
+          if unzip -tq ref_in/download >/dev/null 2>&1; then
+            unzip -q -o ref_in/download -d ref_in/extracted
+            SEARCH=ref_in/extracted
+          else
+            SEARCH=ref_in
+          fi
+          BIN=$(find "$SEARCH" -type f -size +1024k -exec sh -c 'case "$(file -b "$1")" in *ELF*|*Mach-O*) echo "$(wc -c < "$1" | tr -d " ") $1";; esac' _ {} \; | sort -n | tail -1 | cut -d' ' -f2-)
+          test -n "$BIN"
+          cp "$BIN" ref_binary
+          echo "reference binary: $BIN"
+
+      - run: bash tools/r2setup.sh
+
+      - name: decompile reference
+        env:
+          BIN: ref_binary
+          BUDGET: ${{ inputs.seconds || '18000' }}
+          R2PROJ: ref_r2proj
+          CODE_OUT: ref_decompiled.c
+          META_OUT: ref_functions.json
+          ENGINE_OUT: ref_engine.txt
+          R2_LOG: ref_r2.log
+        run: bash tools/decomp.sh
+
+      - name: check reference output
+        run: |
+          test -s ref_decompiled.c
+          echo "ref decompiled.c: $(wc -c < ref_decompiled.c | tr -d ' ') bytes, $(grep -c '^{$' ref_decompiled.c || true) function bodies"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ref-decompile
+          path: |
+            ref_decompiled.c
+            ref_functions.json
