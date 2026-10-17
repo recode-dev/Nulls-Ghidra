@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import struct
 
 MH_MAGIC_64 = 0xfeedfacf
@@ -95,11 +96,11 @@ def macho_sections(data, offset=0):
 
 CHAINED_FIXUPS = 0x80000034
 CHAIN_FORMATS = {
-    1: (8, 11, 62, 0xFFFF),     # arm64e
-    2: (4, 12, 63, 0xFFFFFF),   # ptr64
-    6: (4, 12, 63, 0xFFFFFF),   # ptr64 offset
-    9: (8, 11, 62, 0xFFFF),     # arm64e userland
-    12: (8, 12, 62, 0xFFFFFF),  # arm64e userland24
+    1: (8, 11, 62, 0xFFFF),     
+    2: (4, 12, 63, 0xFFFFFF),   
+    6: (4, 12, 63, 0xFFFFFF),   
+    9: (8, 11, 62, 0xFFFF),     
+    12: (8, 12, 62, 0xFFFFFF),  
 }
 
 

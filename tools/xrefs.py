@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import argparse
 import array
 import bisect
@@ -144,7 +145,7 @@ def arm64_text(data, offset=0):
     if magic != MH_MAGIC_64:
         return None
     cputype = struct.unpack_from('<i', data, offset + 4)[0]
-    if cputype != 0x0100000c:  # CPU_TYPE_ARM64
+    if cputype != 0x0100000c:  
         return None
     for section in macho_sections(data, offset):
         if section['sect'] == '__text' and section['size'] and (section['flags'] & 0x80000000):
@@ -204,7 +205,7 @@ def adrp_string_xrefs(bin_path, functions, strings):
         ins = struct.unpack_from('<I', blob, off)[0]
         site = off
         off += 4
-        if (ins & 0x9F000000) != 0x90000000:  # ADRP
+        if (ins & 0x9F000000) != 0x90000000:  
             continue
         rd = ins & 0x1F
         immlo = (ins >> 29) & 0x3
@@ -217,13 +218,13 @@ def adrp_string_xrefs(bin_path, functions, strings):
         for q in range(off, min(off + 32, limit), 4):
             ins2 = struct.unpack_from('<I', blob, q)[0]
             if (ins2 & 0xFF000000) == 0x91000000 and ((ins2 >> 5) & 0x1F) == rd:
-                # ADD (immediate, 64-bit): add xN, xN, #imm12[, lsl 12]
+                
                 lo12 = (ins2 >> 10) & 0xFFF
                 if (ins2 >> 22) & 0x1:
                     lo12 <<= 12
                 target = (page + lo12) & 0xFFFFFFFFFFFFFFFF
             elif (ins2 & 0xFFC00000) == 0xF9400000 and ((ins2 >> 5) & 0x1F) == rd:
-                # LDR (immediate, 64-bit): ldr xN, [xN, #imm12 * 8]
+                
                 slot = page + ((ins2 >> 10) & 0xFFF) * 8
                 value = deref(slot)
                 if value and value in addr_to_string:
@@ -288,7 +289,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
     found = [(m.start(), m.group(1), m.group(2), m.group(3), m.group(4))
              for m in FUNC_RE.finditer(text)]
     if name_map:
-        # symbol headers carry no address, so match them by name and resolve
+        
         for m in GENERIC_FUNC_RE.finditer(text):
             if m.group(2) in name_map:
                 found.append((m.start(), m.group(1), m.group(2), None, m.group(3)))
@@ -389,8 +390,8 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
         for ref in sorted(refs):
             data_refs.setdefault(f'0x{ref:x}', []).append(key)
 
-    # Merge __unwind_info starts and stack-frame prologues that r2ghidra did
-    # not emit as separate functions, so every real boundary is in the index.
+    
+    
     prologue_starts = prologue_starts or set()
     starts = set(unwind_starts) | set(prologue_starts)
     known_offsets = {int(k, 16) for k in functions}

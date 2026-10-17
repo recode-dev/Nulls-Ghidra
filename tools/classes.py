@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import argparse
 import json
 import os
@@ -35,7 +36,7 @@ def class_fields(fps, methods):
 def flush(classes, cluster, fields):
     if len(cluster) < MIN_METHODS or len(fields) < MIN_FIELDS:
         return
-    # fold the cluster into the vtable class it overlaps most, if any
+    
     best = None
     for name, entry in classes.items():
         if entry.get('vtable') is None:
