@@ -58,7 +58,11 @@ fi
 WORK=${EXTRACT_DIR:-extract}
 rm -rf "$WORK"
 mkdir -p "$WORK"
-unzip -oq "$CACHE/archive" -d "$WORK"
+if file -b "$CACHE/archive" | grep -qE 'Mach-O|ELF'; then
+  cp "$CACHE/archive" "$WORK/direct.bin"
+else
+  unzip -oq "$CACHE/archive" -d "$WORK"
+fi
 
 ROOT="$WORK"
 APP=$(find "$WORK/Payload" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -1 || true)
