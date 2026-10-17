@@ -6,17 +6,8 @@ on:
       url:
         description: direct archive or binary URL (any game)
         default: ''
-      source_urls:
-        description: space separated landing pages resolving to an archive (any game)
-        default: ''
       archive_item:
         description: internet archive item id holding the build (any game)
-        default: ''
-      archive_entry:
-        description: file or entry name inside that archive item
-        default: ''
-      diff_offsets_url:
-        description: URL or raw text of a reference offsets map (C / JS / TS / JSON)
         default: ''
       reference_url:
         description: URL of a reference build (APK / IPA / zip / ELF or Mach-O) to decompile alongside the target
@@ -74,22 +65,18 @@ jobs:
         if: ${{ inputs.archive_item != '' || vars.ARCHIVE_ITEM != '' }}
         env:
           ITEM: ${{ inputs.archive_item || vars.ARCHIVE_ITEM }}
-          ENTRY: ${{ inputs.archive_entry || vars.ARCHIVE_ENTRY }}
-        run: python3 tools/aexec.py --item "$ITEM" --entry "$ENTRY" --out binary
+        run: python3 tools/aexec.py --item "$ITEM" --out binary
 
       - id: rv
         if: ${{ inputs.archive_item != '' || vars.ARCHIVE_ITEM != '' }}
-        env:
-          ENTRY: ${{ inputs.archive_entry || vars.ARCHIVE_ENTRY }}
         run: |
-          V=$(basename "${ENTRY:-build}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+          V=$(basename "build" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
           echo "VER=${V:-unknown}" >> "$GITHUB_OUTPUT"
 
       - id: r
         if: ${{ inputs.archive_item == '' && vars.ARCHIVE_ITEM == '' }}
         env:
           BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
-          SOURCE_URLS: ${{ inputs.source_urls || vars.SOURCE_URLS }}
           RESOLVE_ONLY: '1'
         run: bash tools/fetch.sh
 
@@ -105,7 +92,6 @@ jobs:
         if: ${{ inputs.archive_item == '' && vars.ARCHIVE_ITEM == '' }}
         env:
           BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
-          SOURCE_URLS: ${{ inputs.source_urls || vars.SOURCE_URLS }}
         run: bash tools/fetch.sh
 
       - uses: actions/upload-artifact@v4
@@ -201,35 +187,9 @@ jobs:
             --index_dir index_data \
             --out_dir symbols_out
 
-      - if: ${{ inputs.diff_offsets_url != '' }}
-        run: |
-          python3 tools/diff_versions.py \
-            --old_offsets "${{ inputs.diff_offsets_url }}" \
-            --new_index index_data \
-            --out "offsets_${{ needs.fetch.outputs.ver }}.js" \
-            --out_md Diffed_Offsets.md
-
       - run: |
           python3 tools/search.py --index_dir index_data --role root_update_loop 2>/dev/null | head -5 || true
           python3 tools/search.py --index_dir index_data --field 0x8 | head -5 || true
-
-      - if: ${{ inputs.diff_offsets_url != '' }}
-        run: |
-          python3 tools/offset_finder.py \
-            --names "${{ inputs.diff_offsets_url }}" \
-            --binary "$BIN" \
-            --index_dir index_data \
-            --code decompiled.c \
-            --report resolution_report.md \
-            --out resolved_offsets.js
-
-      - if: ${{ inputs.diff_offsets_url != '' }}
-        run: |
-          python3 tools/verify_offsets.py \
-            --resolved resolved_offsets.js \
-            --index_dir index_data \
-            --out verified_offsets.md
-          cat verified_offsets.md >> "$GITHUB_STEP_SUMMARY"
 
       - if: always()
         run: |
@@ -253,14 +213,6 @@ jobs:
             echo "| Strings | $(count index_data/strings.json) |"
             echo "| Classes | $(count index_data/classes.json) |"
             echo "| Symbols | $(count symbols_out/symbols.json) |"
-            if [ -f resolution_report.md ]; then
-              echo "### Offset resolution (binary validated)"
-              grep -E '^- |^\*\*' resolution_report.md | tail -8
-            fi
-            if [ -f Diffed_Offsets.md ]; then
-              echo "### 🎯 Auto Diffed Offsets"
-              cat Diffed_Offsets.md
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -270,10 +222,6 @@ jobs:
           path: |
             index_data/
             symbols_out/
-            Diffed_Offsets.md
-            resolution_report.md
-            resolved_offsets.js
-            offsets_*.js
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
@@ -288,7 +236,6 @@ jobs:
       - name: fetch and extract reference binary
         env:
           BINARY_URL: ${{ inputs.reference_url }}
-          SOURCE_URLS: ''
           OUT_BIN: ref_binary
           IPA_CACHE_DIR: ref_ipa_cache
           EXTRACT_DIR: ref_extract
