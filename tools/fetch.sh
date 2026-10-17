@@ -18,6 +18,10 @@ loc_page() {
 
 if [ -n "$URL" ]; then
   LOC=$URL
+  DRIVE_ID=$(printf '%s' "$URL" | sed -nE 's#.*drive\.google\.com/file/d/([^/?]+).*#\1#p')
+  if [ -n "$DRIVE_ID" ]; then
+    LOC="https://drive.google.com/uc?export=download&id=$DRIVE_ID"
+  fi
 else
   LOC=""
   for SRC in ${SOURCE_URLS:-}; do
@@ -49,8 +53,18 @@ fi
 mkdir -p "$CACHE"
 if [ ! -s "$CACHE/archive" ]; then
   if ! curl -fL --retry 5 --retry-delay 5 --retry-all-errors --max-time 1800 -A "Mozilla/5.0" \
-    -o "$CACHE/archive" "$LOC"; then
+    -c "$CACHE/cookies.txt" -o "$CACHE/archive" "$LOC"; then
     echo "download failed $LOC"
+    exit 1
+  fi
+  if file -b "$CACHE/archive" | grep -qiE 'HTML'; then
+    CONFIRM=$(grep -oE 'confirm=[0-9A-Za-z_-]+' "$CACHE/archive" | head -1 | cut -d= -f2 || true)
+    if [ -n "$CONFIRM" ]; then
+      curl -fL -b "$CACHE/cookies.txt" -A "Mozilla/5.0" -o "$CACHE/archive" "$LOC&confirm=$CONFIRM"
+    fi
+  fi
+  if file -b "$CACHE/archive" | grep -qiE 'HTML'; then
+    echo "download returned an HTML page instead of a file: $LOC"
     exit 1
   fi
 fi
