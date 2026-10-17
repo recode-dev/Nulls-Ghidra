@@ -150,6 +150,24 @@ jobs:
             --bin "$BIN" \
             --index_dir index_data
 
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
+        run: |
+          python3 tools/unwind.py \
+            --bin "$BIN" \
+            --out index_data/unwind.json
+
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
+        run: |
+          python3 tools/fields.py \
+            --code decompiled.c \
+            --out index_data/fields.json
+
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
+        run: |
+          python3 tools/ctors.py \
+            --bin "$BIN" \
+            --index_dir index_data
+
       - if: ${{ github.event_name != 'workflow_dispatch' || inputs.fingerprint }}
         run: |
           python3 tools/fingerprint.py \
