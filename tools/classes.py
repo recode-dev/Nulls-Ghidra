@@ -55,12 +55,15 @@ def main():
 
     classes = {}
     for vt_addr, vt_data in vtables.items():
+        if vt_data.get('alias_of'):
+            continue
         methods = vt_data.get('methods', [])
         classes[f'VTableClass_{vt_addr}'] = {
             'vtable': vt_addr,
             'methods_count': len(methods),
             'methods': methods,
             'fields': class_fields(fps, methods),
+            'aliases': len(vt_data.get('aliases', [])),
         }
 
     offsets = sorted(int(k, 16) for k in fps)

@@ -210,12 +210,16 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts):
         section = section_of(sections, base + rva)
         if section:
             by_section.setdefault(f"{section['seg']}.{section['sect']}", set()).add(rva)
-    for offsets in by_section.values():
+    ends = {f"{s['seg']}.{s['sect']}": s['addr'] + s['size'] - base for s in sections}
+    for name, offsets in by_section.items():
         ordered = sorted(offsets)
         for current, following in zip(ordered, ordered[1:]):
             key = f'0x{current:x}'
             if key in functions:
                 functions[key]['size_bytes'] = following - current
+        last = f'0x{ordered[-1]:x}'
+        if last in functions and name in ends and ends[name] > ordered[-1]:
+            functions[last]['size_bytes'] = ends[name] - ordered[-1]
 
     for key, entry in functions.items():
         for callee in entry['calls']:

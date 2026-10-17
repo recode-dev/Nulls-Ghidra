@@ -4,7 +4,7 @@ import json
 import os
 import struct
 
-from binary import detect_base, macho_sections
+from binary import macho_sections
 
 SECOND_LEVEL_REGULAR = 2
 SECOND_LEVEL_COMPRESSED = 3
@@ -28,20 +28,15 @@ def parse_page(blob, base_offset, function_offset):
     kind = struct.unpack_from('<I', blob, base_offset)[0]
     out = []
     if kind == SECOND_LEVEL_COMPRESSED:
-        entry_off, entry_count, enc_off, enc_count = struct.unpack_from('<HHHH', blob, base_offset + 4)
-        encodings = [struct.unpack_from('<I', blob, base_offset + enc_off + i * 4)[0]
-                     for i in range(enc_count)]
+        entry_off, entry_count, _enc_off, _enc_count = struct.unpack_from('<HHHH', blob, base_offset + 4)
         for i in range(entry_count):
             value = struct.unpack_from('<I', blob, base_offset + entry_off + i * 4)[0]
-            delta = value & 0xFFFFFF
-            index = value >> 24
-            encoding = encodings[min(index, len(encodings) - 1)] if encodings else 0
-            out.append((function_offset + delta, encoding))
+            out.append(function_offset + (value & 0xFFFFFF))
     elif kind == SECOND_LEVEL_REGULAR:
         entry_off, entry_count = struct.unpack_from('<HH', blob, base_offset + 4)
         for i in range(entry_count):
-            offset, encoding = struct.unpack_from('<II', blob, base_offset + entry_off + i * 8)
-            out.append((offset, encoding))
+            offset, _encoding = struct.unpack_from('<II', blob, base_offset + entry_off + i * 8)
+            out.append(offset)
     return out
 
 
@@ -49,7 +44,6 @@ def main():
     args = parse_args()
     with open(args.bin, 'rb') as f:
         data = f.read()
-    base = detect_base(args.bin)
     info = section(data, '__unwind_info')
     if info is None:
         raise SystemExit('[-] no __unwind_info section')
@@ -58,7 +52,7 @@ def main():
     version, _ce_off, _ce_count, _pa_off, _pa_count, index_off, index_count = struct.unpack_from('<7I', blob, 0)
 
     index = [struct.unpack_from('<3I', blob, index_off + i * 12) for i in range(index_count)]
-    starts = {}
+    starts = set()
     lsda = set()
     for i, (function_offset, page_off, lsda_off) in enumerate(index):
         limit = index[i + 1][0] if i + 1 < len(index) else info['size']
@@ -69,8 +63,8 @@ def main():
                 break
             lsda.add(function)
             record_off += 8
-        for address, encoding in parse_page(blob, page_off, function_offset):
-            starts.setdefault(address, encoding)
+        for address in parse_page(blob, page_off, function_offset):
+            starts.add(address)
 
     payload = {
         'version': version,
