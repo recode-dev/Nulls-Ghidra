@@ -106,6 +106,13 @@ def main():
         if offset is None:
             continue
         address = target + offset
+        # adrp + add + add is common for address points (vtable + 16)
+        for j in range(step + 1, min(step + args.window, len(words) - i - 1) + 1):
+            extra = add_offset(words[i + j], reg)
+            if extra is None:
+                break
+            address += extra
+            step = j
         section = next((s for s in data_sections if s['addr'] <= address < s['addr'] + s['size']), None)
         if section is None:
             continue
