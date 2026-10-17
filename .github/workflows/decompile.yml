@@ -6,10 +6,6 @@ on:
       url:
         description: direct archive or binary URL (any game)
         default: ''
-      symbolize:
-        description: generate IDA / Ghidra / radare2 symbol maps
-        type: boolean
-        default: true
       extract_all:
         description: extract strings, xrefs, and call graphs
         type: boolean
@@ -161,12 +157,6 @@ jobs:
             --index_dir index_data \
             --out index_data/classes.json
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.symbolize }}
-        run: |
-          python3 tools/symbolize.py \
-            --index_dir index_data \
-            --out_dir symbols_out
-
       - run: |
           python3 tools/search.py --index_dir index_data --role root_update_loop 2>/dev/null | head -5 || true
           python3 tools/search.py --index_dir index_data --field 0x8 | head -5 || true
@@ -192,7 +182,6 @@ jobs:
             echo "| Functions | $(count index_data/functions.json) |"
             echo "| Strings | $(count index_data/strings.json) |"
             echo "| Classes | $(count index_data/classes.json) |"
-            echo "| Symbols | $(count symbols_out/symbols.json) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -201,7 +190,6 @@ jobs:
           name: main_binary-${{ needs.fetch.outputs.ver }}
           path: |
             index_data/
-            symbols_out/
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
