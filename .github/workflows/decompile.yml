@@ -279,29 +279,21 @@ jobs:
           if-no-files-found: warn
 
   ref_dump:
-    if: ${{ inputs.reference_url != '' || vars.REFERENCE_URL != '' }}
+    if: ${{ inputs.reference_url != '' }}
     runs-on: macos-14
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
-      - name: fetch reference build
+      - name: fetch and extract reference binary
         env:
-          REF_URL: ${{ inputs.reference_url || vars.REFERENCE_URL }}
-        run: |
-          set -euo pipefail
-          mkdir -p ref_in
-          curl -fL --retry 3 -o ref_in/download "$REF_URL"
-          if unzip -tq ref_in/download >/dev/null 2>&1; then
-            unzip -q -o ref_in/download -d ref_in/extracted
-            SEARCH=ref_in/extracted
-          else
-            SEARCH=ref_in
-          fi
-          BIN=$(find "$SEARCH" -type f -size +1024k -exec sh -c 'case "$(file -b "$1")" in *ELF*|*Mach-O*) echo "$(wc -c < "$1" | tr -d " ") $1";; esac' _ {} \; | sort -n | tail -1 | cut -d' ' -f2-)
-          test -n "$BIN"
-          cp "$BIN" ref_binary
-          echo "reference binary: $BIN"
+          BINARY_URL: ${{ inputs.reference_url }}
+          SOURCE_URLS: ''
+          OUT_BIN: ref_binary
+          IPA_CACHE_DIR: ref_ipa_cache
+          EXTRACT_DIR: ref_extract
+          VERSION_FILE: ref_version.txt
+        run: bash tools/fetch.sh
 
       - run: bash tools/r2setup.sh
 
@@ -314,7 +306,9 @@ jobs:
           META_OUT: ref_functions.json
           ENGINE_OUT: ref_engine.txt
           R2_LOG: ref_r2.log
-        run: bash tools/decomp.sh
+        run: |
+          PHASE=analyze bash tools/decomp.sh
+          bash tools/decomp.sh
 
       - name: check reference output
         run: |
@@ -327,3 +321,4 @@ jobs:
           path: |
             ref_decompiled.c
             ref_functions.json
+            ref_version.txt
