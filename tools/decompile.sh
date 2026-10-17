@@ -6,11 +6,9 @@ BUDGET=${BUDGET:-18000}
 PHASE=${PHASE:-all}
 PROJ=${R2PROJ:-r2proj}
 CODE=${CODE_OUT:-decompiled.c}
-META=${META_OUT:-functions.json}
 ENG=${ENGINE_OUT:-engine.txt}
 LOG=${R2_LOG:-r2.log}
 R2=${R2BIN:-r2}
-HERE=$(cd "$(dirname "$0")" && pwd)
 
 O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=true -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
 
@@ -50,10 +48,6 @@ if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
   fi
 fi
 [ "$PHASE" = analyze ] && exit 0
-
-if [ -f "$PROJ" ]; then
-  "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c aflj "$BIN" > "$META" 2>/dev/null
-fi
 
 rm -f "$CODE" "$LOG" "$ENG"
 : > "$LOG"

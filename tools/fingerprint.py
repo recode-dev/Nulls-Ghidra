@@ -2,7 +2,6 @@
 import json
 import os
 import re
-import sys
 import argparse
 
 def parse_args():
@@ -66,7 +65,7 @@ def main():
             "lines": len(body.splitlines()),
             "ret_field": ret_field,
             "ret_global": ret_global,
-            "vtables_assigned": [f"0x{int(v, 16) - 0x100000000:x}" if int(v, 16) >= 0x100000000 else v for v in vtables],
+            "vtables_assigned": [f"0x{(int(v, 16) - base) if int(v, 16) >= base else int(v, 16):x}" for v in vtables],
             "fields_accessed": fields[:30],
             "math_constants": consts[:15],
             "float_constants": floats[:15],

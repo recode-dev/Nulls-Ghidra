@@ -117,7 +117,7 @@ jobs:
           echo "cache project=$proj dump=$code"
 
       - if: ${{ steps.state.outputs.proj != 'ready' || steps.state.outputs.code != 'ready' }}
-        run: bash tools/r2setup.sh
+        run: bash tools/setup.sh
 
       - if: ${{ steps.state.outputs.proj != 'ready' }}
         env:
@@ -158,7 +158,7 @@ jobs:
 
       - if: ${{ github.event_name != 'workflow_dispatch' || inputs.reconstruct_classes }}
         run: |
-          python3 tools/class_reconstructor.py \
+          python3 tools/classes.py \
             --index_dir index_data \
             --out index_data/classes.json
 
