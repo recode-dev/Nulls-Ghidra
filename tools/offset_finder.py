@@ -30,9 +30,7 @@ def parse_args():
     p.add_argument('--binary', default='', help='target binary (Mach-O or ELF)')
     p.add_argument('--index_dir', default='', help='dump index directory')
     p.add_argument('--code', default='', help='decompiled dump providing accessor evidence')
-    p.add_argument('--reference_binary', default='', help='binary of the build the reference map belongs to; enables signature transfer')
     p.add_argument('--structural', action='store_true', help='order/size-rank alignment for code entries with class anchors')
-    p.add_argument('--selftest', action='store_true', help='prove the signature masking survives address and immediate rewriting')
     p.add_argument('--filter', default='', help='restrict to names containing this substring')
     p.add_argument('--out', default='', help='resolved map output (JSON, validated entries only)')
     p.add_argument('--report', default='', help='markdown report output')
@@ -296,105 +294,6 @@ def code_runs(entries):
     return runs
 
 
-BRANCH_MASK = 0xFC000000
-PAGE_REGS = 0x9F00001F
-IMM12 = 0xFFC003FF
-MOVWIDE = 0xFF80001F
-LITLOAD = 0xFF00001F
-
-
-def mask_word(word):
-    if word & BRANCH_MASK in (0x14000000, 0x94000000):
-        return word & BRANCH_MASK, BRANCH_MASK
-    if word & 0x9F000000 in (0x90000000, 0x10000000):
-        return word & PAGE_REGS, PAGE_REGS
-    if word & 0x1F000000 in (0x11000000, 0x31000000, 0x51000000, 0x71000000, 0xB1000000, 0xD1000000):
-        return word & IMM12, IMM12
-    if word & 0x3B000000 in (0x39000000, 0x79000000, 0xB9000000, 0xF9000000):
-        return word & IMM12, IMM12
-    if word & 0x7F800000 in (0x12800000, 0x32800000, 0x52800000, 0x72800000):
-        return word & MOVWIDE, MOVWIDE
-    if word & 0x3B000000 in (0x18000000, 0x58000000):
-        return word & LITLOAD, LITLOAD
-    if word & 0x7E000000 in (0x34000000, 0x36000000, 0x74000000, 0xB6000000):
-        return word & 0x7E000000, 0x7E000000
-    return word, 0xFFFFFFFF
-
-
-def masked_words(binary, rva, count, skip=0):
-    base = rva + skip * 4
-    raw = binary.read_rva(base, count * 4)
-    if len(raw) < count * 4 or not any(raw):
-        return None
-    words = struct.unpack(f'<{count}I', raw)
-    return tuple(mask_word(w)[0] for w in words)
-
-
-def signature(binary, rva, count=5, skip=1):
-    for shift in (skip, 0, 2):
-        words = masked_words(binary, rva, count, shift)
-        if words:
-            return shift, words
-    return None, None
-
-
-def build_signature_index(binary, addresses, count=5):
-    index = {}
-    for rva in addresses:
-        skip, words = signature(binary, rva, count)
-        if words is None:
-            continue
-        index.setdefault((skip, words), []).append(rva)
-    return index
-
-
-def verify_masking(binary, rvas, count=5):
-    passed, rejected = 0, 0
-    for rva in rvas:
-        shift, words = signature(binary, rva, count)
-        if words is None:
-            rejected += 1
-            continue
-        raw = binary.read_rva(rva + shift * 4, count * 4)
-        stable = True
-        for word in struct.unpack(f'<{count}I', raw):
-            value, mask = mask_word(word)
-            if mask_word(word ^ ((~mask) & 0xFFFFFFFF))[0] != value:
-                stable = False
-                break
-        if stable:
-            passed += 1
-        else:
-            rejected += 1
-    return passed, rejected
-
-
-SIGNATURE_WIDTHS = (6, 10, 16)
-
-
-def transfer(binary, ref_binary, entries, funcs):
-    indices = {count: build_signature_index(binary, [int(o, 16) for o in funcs], count)
-               for count in SIGNATURE_WIDTHS}
-    results = {}
-    for name, value in entries.items():
-        rva = value - ref_binary.image_base if ref_binary.in_image(value) else value
-        status, addr, candidates, width = 'NO-SIGNATURE', None, 0, 0
-        for count in SIGNATURE_WIDTHS:
-            shift, words = signature(ref_binary, rva, count)
-            if words is None:
-                continue
-            hits = indices[count].get((shift, words), [])
-            candidates, width = len(hits), count
-            if candidates == 1:
-                status, addr = 'RESOLVED', hits[0]
-                break
-            status = 'NO-MATCH' if not hits else 'SHORTLIST'
-            if not hits:
-                break
-        results[name] = (status, addr, candidates, width)
-    return results
-
-
 def structural_map(binary, names, funcs, fps, centers):
     order_entries = {}
     size_entries = {}
@@ -477,28 +376,6 @@ def main():
                 for n in agree:
                     f.write(f'    "{n}": 0x{agree[n] + binary.image_base:x},\n')
                 f.write('};\n')
-        return
-
-    if args.selftest:
-        sample = [int(o, 16) for o in sorted(funcs, key=lambda k: -funcs[k].get('size_chars', 0))[:3000]]
-        passed, rejected = verify_masking(binary, sample)
-        print(f'- arch {binary.arch}\n- sampled functions: {len(sample)}\n'
-              f'- signature unchanged after rewriting every masked address/immediate bit: {passed}\n'
-              f'- unusable: {rejected}\n- verdict: {"PASS" if passed and not rejected else "PARTIAL"}')
-        return
-
-    if args.reference_binary:
-        ref_binary = Binary(args.reference_binary)
-        entries = {n: v for n, v in names.items() if v >= FIELD_LIMIT}
-        results = transfer(binary, ref_binary, entries, funcs)
-        ok = sum(1 for status, *_ in results.values() if status == 'RESOLVED')
-        print(f'- reference build: {os.path.basename(args.reference_binary)} arch {ref_binary.arch} '
-              f'base {hex(ref_binary.image_base)}\n- target build: {os.path.basename(args.binary)} arch {binary.arch} '
-              f'base {hex(binary.image_base)}\n- code entries: {len(entries)}\n'
-              f'- resolved with a unique byte-level match: {ok}')
-        for name in sorted(results):
-            status, addr, cands, words = results[name]
-            print(f'- {name}: {status}{" 0x%x" % addr if addr is not None else ""} (candidates {cands}, words {words})')
         return
 
     lines = ['# Offset resolution', '',
