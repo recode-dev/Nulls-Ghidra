@@ -3,15 +3,16 @@ name: decompile
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: direct archive or binary URL (any game)
-        default: ''
+      binary:
+        description: path to the binary committed in the repo
+        default: 'binary'
       seconds:
         description: total analysis budget in seconds
         default: '18000'
   push:
     branches: [main]
     paths:
+      - 'binary'
       - '.github/workflows/decompile.yml'
       - 'tools/**'
 
@@ -23,66 +24,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    outputs:
-      ver: ${{ steps.r.outputs.VER }}
-      size: ${{ steps.g.outputs.BINSIZE }}
-      url_hash: ${{ steps.uh.outputs.URL_HASH }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - id: uh
-        run: |
-          U="${{ inputs.url }}"
-          H=$(echo -n "$U" | shasum -a 256 | awk '{print $1}')
-          echo "URL_HASH=$H" >> "$GITHUB_OUTPUT"
-
-      - id: r
-        env:
-          BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
-          RESOLVE_ONLY: '1'
-        run: bash tools/fetch.sh
-
-      - uses: actions/cache@v4
-        with:
-          path: ipa_cache
-          key: ipa-${{ steps.r.outputs.VER }}-${{ steps.uh.outputs.URL_HASH }}
-          restore-keys: |
-            ipa-${{ steps.r.outputs.VER }}-
-            ipa-
-
-      - id: g
-        env:
-          BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
-        run: bash tools/fetch.sh
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin
-          path: binary
-          retention-days: 30
-
   dump:
-    needs: fetch
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: bin
-          path: bin
-
       - run: |
           set -euo pipefail
-          BIN=$(find bin -type f | head -1)
+          BIN="${{ inputs.binary || 'binary' }}"
           test -s "$BIN"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
-          BH=$(shasum -a 256 "$BIN" | awk '{print $1}')
-          echo "BIN_HASH=$BH" >> "$GITHUB_ENV"
+          echo "BIN_HASH=$(shasum -a 256 "$BIN" | awk '{print $1}')" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4
         id: decompile-cache
@@ -90,7 +43,7 @@ jobs:
           path: |
             r2proj
             decompiled.c
-          key: decompile-${{ env.BIN_HASH }}-${{ needs.fetch.outputs.url_hash }}
+          key: decompile-${{ env.BIN_HASH }}
           restore-keys: |
             decompile-${{ env.BIN_HASH }}-
 
@@ -98,8 +51,8 @@ jobs:
         run: |
           proj=missing
           code=missing
-          if [ -s r2proj ]; then proj=ready; fi
-          if [ -s decompiled.c ]; then code=ready; fi
+          [ -s r2proj ] && proj=ready
+          [ -s decompiled.c ] && code=ready
           echo "proj=$proj" >> "$GITHUB_OUTPUT"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "cache project=$proj dump=$code"
@@ -125,41 +78,19 @@ jobs:
           echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
           test "${bodies:-0}" -gt 0
 
-      - run: |
-          python3 tools/unwind.py \
-            --bin "$BIN" \
-            --out index_data/unwind.json
+      - run: python3 tools/unwind.py --bin "$BIN" --out index_data/unwind.json
 
-      - run: |
-          python3 tools/xrefs.py \
-            --bin "$BIN" \
-            --code decompiled.c \
-            --out index_data
+      - run: python3 tools/xrefs.py --bin "$BIN" --code decompiled.c --out index_data
 
-      - run: |
-          python3 tools/vtables.py \
-            --bin "$BIN" \
-            --index_dir index_data
+      - run: python3 tools/vtables.py --bin "$BIN" --index_dir index_data
 
-      - run: |
-          python3 tools/fields.py \
-            --code decompiled.c \
-            --out index_data/fields.json
+      - run: python3 tools/fields.py --code decompiled.c --out index_data/fields.json
 
-      - run: |
-          python3 tools/ctors.py \
-            --bin "$BIN" \
-            --index_dir index_data
+      - run: python3 tools/ctors.py --bin "$BIN" --index_dir index_data
 
-      - run: |
-          python3 tools/fingerprint.py \
-            --code decompiled.c \
-            --out index_data/fingerprints.json
+      - run: python3 tools/fingerprint.py --code decompiled.c --out index_data/fingerprints.json
 
-      - run: |
-          python3 tools/classes.py \
-            --index_dir index_data \
-            --out index_data/classes.json
+      - run: python3 tools/classes.py --index_dir index_data --out index_data/classes.json
 
       - if: always()
         run: |
@@ -171,7 +102,7 @@ jobs:
             fi
           }
           {
-            echo "### Dump & Indexing Summary (${{ needs.fetch.outputs.ver }})"
+            echo "### Dump & Indexing Summary"
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Cache Hit | ${{ steps.decompile-cache.outputs.cache-hit == 'true' }} |"
@@ -187,9 +118,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: main_binary-${{ needs.fetch.outputs.ver }}
+          name: main_binary
           path: |
             index_data/
             decompiled.c
+            ${{ inputs.binary || 'binary' }}
           retention-days: 30
           if-no-files-found: warn

@@ -70,7 +70,7 @@ def main():
         entry['writes' if write else 'reads'] += 1
         if kind:
             entry['types'][kind] += 1
-        if owner is not None and len(entry['funcs']) < 20:
+        if owner is not None:
             entry['funcs'].add(owner)
 
     def touch_index(offset, write):

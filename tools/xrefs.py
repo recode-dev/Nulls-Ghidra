@@ -369,6 +369,13 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts):
     return functions, strings_xref, data_refs, edges
 
 
+def string_vmaddr(sections, fileoff):
+    for s in sections:
+        if s['fileoff'] <= fileoff < s['fileoff'] + s['size']:
+            return s['addr'] + (fileoff - s['fileoff'])
+    return None
+
+
 def main():
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -385,8 +392,11 @@ def main():
                                                            args.max_field_offset, sections,
                                                            unwind_starts)
     strings = bin_strings(args.bin, args.min_string)
+    with open(args.bin, 'rb') as f:
+        all_sections = macho_sections(f.read())
     for entry in strings.values():
-        entry['address'] = base + entry.pop('offset')
+        fileoff = entry.pop('offset')
+        entry['address'] = string_vmaddr(all_sections, fileoff) or base + fileoff
 
     for text_, keys in adrp_string_xrefs(args.bin, functions, strings).items():
         merged = set(strings_xref.get(text_, []))

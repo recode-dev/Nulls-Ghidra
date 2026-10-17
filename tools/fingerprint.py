@@ -27,7 +27,7 @@ def main():
     ret_glob_re = re.compile(r'return\s+\*\((\w+)\s*\*\)(0x10[0-9a-fA-F]+);')
     const_re = re.compile(r'\b(0x[0-9a-fA-F]{4,16})\b')
     float_re = re.compile(r'\b\d+\.\d+(?:f)?\b')
-    call_re = re.compile(r'fcn\.(10[0-9a-fA-F]+)')
+    call_re = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
     loop_re = re.compile(r'\b(while|for|do)\b')
     vt_re = re.compile(r'\*\((?:ulong|int64_t|code\s*\*)\s*\*\)\s*arg1\s*=\s*(?:aav\.)?(0x100[0-9a-fA-F]+);')
 
