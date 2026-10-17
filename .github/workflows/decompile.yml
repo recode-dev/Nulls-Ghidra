@@ -238,7 +238,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: full-dump-${{ needs.fetch.outputs.ver }}
+          name: main_binary-${{ needs.fetch.outputs.ver }}
           path: |
             index_data/
             symbols_out/
@@ -288,7 +288,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ref-decompile
+          name: reference_binary
           path: |
             ref_decompiled.c
             ref_functions.json
