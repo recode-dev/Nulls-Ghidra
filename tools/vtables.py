@@ -106,7 +106,12 @@ def main():
     if functions is None:
         raise SystemExit(f'[-] {os.path.join(args.index_dir, "functions.json")} not found, run xrefs.py first')
     fingerprints = load(os.path.join(args.index_dir, 'fingerprints.json'), {})
-    starts = sorted(v['offset'] for v in functions.values())
+    unwind_path = os.path.join(args.index_dir, 'unwind.json')
+    unwind = set()
+    if os.path.exists(unwind_path):
+        with open(unwind_path) as f:
+            unwind = {int(v, 16) for v in json.load(f).get('starts', [])}
+    starts = sorted(set(v['offset'] for v in functions.values()) | unwind)
     starts_set = set(starts)
     if not starts:
         raise SystemExit('[-] functions.json is empty')
@@ -151,6 +156,7 @@ def main():
     biggest = max(vtables.values(), key=lambda v: v['slots']) if vtables else None
     print(f'[+] vtables={len(vtables)} slots={slots} signatures={len(unique)} '
           f'aliases={len(vtables) - len(unique)} extends={inherited} '
+          f'starts={len(starts)} '
           f'max={biggest["slots"] if biggest else 0}@{biggest["address"] if biggest else "-"} -> {out}')
 
 

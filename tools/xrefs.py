@@ -36,6 +36,7 @@ def parse_args():
     p.add_argument('--max-field-offset', type=lambda v: int(v, 0), default=0x20000,
                    help='largest value treated as a struct field offset')
     p.add_argument('--min-string', type=int, default=4, help='shortest binary string to keep')
+    p.add_argument('--unwind', default='', help='unwind.json path, defaults to <out>/unwind.json')
     return p.parse_args()
 
 
@@ -113,7 +114,7 @@ def section_of(sections, address):
     return None
 
 
-def parse_code(code_path, base, image_size, max_field, sections):
+def parse_code(code_path, base, image_size, max_field, sections, unwind_starts):
     with open(code_path, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
@@ -176,6 +177,7 @@ def parse_code(code_path, base, image_size, max_field, sections):
             'args': len(args),
             'section': (lambda s: f"{s['seg']}.{s['sect']}" if s else None)(section_of(sections, address)),
             'size_bytes': None,
+            'unwind': rva in unwind_starts,
             'size_chars': len(body),
             'lines': len(body.splitlines()),
             'depth': depth_of(body),
@@ -201,12 +203,19 @@ def parse_code(code_path, base, image_size, max_field, sections):
             data_refs.setdefault(f'0x{ref:x}', []).append(key)
 
     by_section = {}
-    for key, entry in functions.items():
-        by_section.setdefault(entry['section'], []).append(entry['offset'])
+    for entry in functions.values():
+        if entry['section']:
+            by_section.setdefault(entry['section'], set()).add(entry['offset'])
+    for rva in unwind_starts:
+        section = section_of(sections, base + rva)
+        if section:
+            by_section.setdefault(f"{section['seg']}.{section['sect']}", set()).add(rva)
     for offsets in by_section.values():
-        offsets.sort()
-        for current, following in zip(offsets, offsets[1:]):
-            functions[f'0x{current:x}']['size_bytes'] = following - current
+        ordered = sorted(offsets)
+        for current, following in zip(ordered, ordered[1:]):
+            key = f'0x{current:x}'
+            if key in functions:
+                functions[key]['size_bytes'] = following - current
 
     for key, entry in functions.items():
         for callee in entry['calls']:
@@ -237,8 +246,14 @@ def main():
     base = detect_base(args.bin)
     image_size = os.path.getsize(args.bin)
     sections = exec_sections(args.bin)
+    unwind_path = args.unwind or os.path.join(args.out, 'unwind.json')
+    unwind_starts = set()
+    if os.path.exists(unwind_path):
+        with open(unwind_path) as f:
+            unwind_starts = {int(v, 16) for v in json.load(f).get('starts', [])}
     functions, strings_xref, data_refs, edges = parse_code(args.code, base, image_size,
-                                                           args.max_field_offset, sections)
+                                                           args.max_field_offset, sections,
+                                                           unwind_starts)
     strings = bin_strings(args.bin, args.min_string)
     for entry in strings.values():
         entry['address'] = base + entry.pop('offset')

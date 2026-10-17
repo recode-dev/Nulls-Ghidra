@@ -139,6 +139,12 @@ jobs:
 
       - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
         run: |
+          python3 tools/unwind.py \
+            --bin "$BIN" \
+            --out index_data/unwind.json
+
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
+        run: |
           python3 tools/xrefs.py \
             --bin "$BIN" \
             --code decompiled.c \
@@ -149,12 +155,6 @@ jobs:
           python3 tools/vtables.py \
             --bin "$BIN" \
             --index_dir index_data
-
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
-        run: |
-          python3 tools/unwind.py \
-            --bin "$BIN" \
-            --out index_data/unwind.json
 
       - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
         run: |
