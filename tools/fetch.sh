@@ -58,9 +58,17 @@ if [ ! -s "$CACHE/archive" ]; then
     exit 1
   fi
   if file -b "$CACHE/archive" | grep -qiE 'HTML'; then
-    CONFIRM=$(grep -oE 'confirm=[0-9A-Za-z_-]+' "$CACHE/archive" | head -1 | cut -d= -f2 || true)
-    if [ -n "$CONFIRM" ]; then
-      curl -fL -b "$CACHE/cookies.txt" -A "Mozilla/5.0" -o "$CACHE/archive" "$LOC&confirm=$CONFIRM"
+    ACTION=$(grep -oE 'action="https://drive\.usercontent\.google\.com/download[^"]*"' "$CACHE/archive" \
+      | head -1 | sed -e 's/^action="//' -e 's/"$//' || true)
+    ARGS=$(grep -oE '<input type="hidden" name="[^"]+" value="[^"]*"' "$CACHE/archive" 2>/dev/null \
+      | sed -E 's/.*name="([^"]+)" value="([^"]*)".*/\1=\2/' | paste -sd'&' - || true)
+    if [ -n "$ACTION" ] && [ -n "$ARGS" ]; then
+      curl -fL -b "$CACHE/cookies.txt" -A "Mozilla/5.0" -o "$CACHE/archive" "$ACTION?$ARGS"
+    else
+      CONFIRM=$(grep -oE 'confirm=[0-9A-Za-z_-]+' "$CACHE/archive" | head -1 | cut -d= -f2 || true)
+      if [ -n "$CONFIRM" ]; then
+        curl -fL -b "$CACHE/cookies.txt" -A "Mozilla/5.0" -o "$CACHE/archive" "$LOC&confirm=$CONFIRM"
+      fi
     fi
   fi
   if file -b "$CACHE/archive" | grep -qiE 'HTML'; then
@@ -103,6 +111,14 @@ sort -rn "$BINARIES" 2>/dev/null | head -5
 EXEC=""
 if [ -f "$ROOT/Info.plist" ]; then
   EXEC=$(python3 -c "import plistlib,sys;print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable','') or '')" "$ROOT/Info.plist" 2>/dev/null || true)
+  if [ "$VER" = unknown ]; then
+    IV=$(python3 -c "import plistlib,sys;d=plistlib.load(open(sys.argv[1],'rb'));print(d.get('CFBundleShortVersionString') or d.get('CFBundleVersion') or '')" "$ROOT/Info.plist" 2>/dev/null || true)
+    if [ -n "$IV" ]; then
+      VER=$IV
+      echo "$VER" > "$VERFILE"
+      echo "ver $VER (Info.plist)"
+    fi
+  fi
 fi
 
 rm -f "$OUT"
@@ -125,4 +141,5 @@ SIZE=$(wc -c < "$OUT" | tr -d ' ')
 echo "bin $OUT $SIZE"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "BINSIZE=$SIZE" >> "$GITHUB_OUTPUT"
+  echo "VER=$VER" >> "$GITHUB_OUTPUT"
 fi

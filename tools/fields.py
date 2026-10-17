@@ -10,9 +10,12 @@ from xrefs import FUNC_RE
 
 TYPED_RE = re.compile(
     r'\*\s*\(\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*)\s*\*\s*\)\s*'
-    r'\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*(?P<offset>0x[0-9a-fA-F]+)\s*\)'
+    r'\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*(?P<offset>0x[0-9a-fA-F]+|\d+)\s*\)'
 )
-INDEX_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\s*\[\s*(?P<offset>0x[0-9a-fA-F]+)\s*\]')
+INDEX_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\s*\[\s*(?P<offset>0x[0-9a-fA-F]+|\d+)\s*\]')
+ARROW_RE = re.compile(
+    r'[A-Za-z_][A-Za-z0-9_]*\s*->\s*(?P<name>field_0x(?P<offset>[0-9a-fA-F]+))'
+)
 WIDTHS = {
     'char': 1, 'uchar': 1, 'byte': 1, 'undefined1': 1, 'int8_t': 1, 'uint8_t': 1,
     'short': 2, 'ushort': 2, 'undefined2': 2, 'int16_t': 2, 'uint16_t': 2,
@@ -66,27 +69,40 @@ def main():
 
     def touch(offset, kind, write, owner):
         entry = fields.setdefault(offset, {'reads': 0, 'writes': 0,
-                                           'types': collections.Counter(), 'funcs': set()})
+                                           'types': collections.Counter(),
+                                           'funcs': set(), 'wfuncs': set()})
         entry['writes' if write else 'reads'] += 1
         if kind:
             entry['types'][kind] += 1
         if owner is not None:
             entry['funcs'].add(owner)
+            if write:
+                entry['wfuncs'].add(owner)
 
     def touch_index(offset, write):
         entry = indices.setdefault(offset, {'reads': 0, 'writes': 0})
         entry['writes' if write else 'reads'] += 1
 
     for match in TYPED_RE.finditer(text):
-        offset = int(match.group('offset'), 16)
+        token = match.group('offset')
+        offset = int(token, 16) if token.lower().startswith('0x') else int(token)
         if offset >= args.max_offset:
             continue
         position = bisect.bisect_right(positions, match.start()) - 1
         owner = f'0x{functions[position][1] - base:x}' if position >= 0 else None
         touch(offset, match.group('type'), is_write(text, match.end()), owner)
 
-    for match in INDEX_RE.finditer(text):
+    for match in ARROW_RE.finditer(text):
         offset = int(match.group('offset'), 16)
+        if offset >= args.max_offset:
+            continue
+        position = bisect.bisect_right(positions, match.start()) - 1
+        owner = f'0x{functions[position][1] - base:x}' if position >= 0 else None
+        touch(offset, None, is_write(text, match.end()), owner)
+
+    for match in INDEX_RE.finditer(text):
+        token = match.group('offset')
+        offset = int(token, 16) if token.lower().startswith('0x') else int(token)
         if offset >= args.max_offset:
             continue
         position = bisect.bisect_right(positions, match.start()) - 1
@@ -106,6 +122,7 @@ def main():
             'width': width,
             'types': types,
             'funcs': sorted(entry['funcs']),
+            'writers': sorted(entry['wfuncs']),
         }
 
     index_export = {f'0x{offset:x}': entry for offset, entry in sorted(indices.items())}

@@ -15,7 +15,11 @@ ADD_MASK = 0xFF000000
 ADD_OP = 0x91000000
 STR_MASK = 0xFFC00000
 STR_OP = 0xF9000000
+STUR_OP = 0xF8000000
 LDR_OP = 0xF9400000
+LDUR_OP = 0xF8400000
+STP_OP = 0xA9000000
+LDP_OP = 0xA9400000
 MAX_TABLE = 32
 
 
@@ -87,12 +91,18 @@ def main():
     start = text['addr']
 
     refs = {}
-    for i in range(len(words) - args.window):
+    for i in range(len(words) - 1):
         page = adrp_target(words[i], start + i * 4)
         if page is None:
             continue
         target, reg = page
-        offset = add_offset(words[i + 1], reg)
+        offset = None
+        step = 1
+        for j in range(1, min(args.window, len(words) - i - 1) + 1):
+            offset = add_offset(words[i + j], reg)
+            if offset is not None:
+                step = j
+                break
         if offset is None:
             continue
         address = target + offset
@@ -100,17 +110,29 @@ def main():
         if section is None:
             continue
         entry = refs.setdefault(address, {'section': f"{section['seg']}.{section['sect']}",
-                                          'store': 0, 'load': 0, 'addr': 0,
+                                          'store': 0, 'load': 0, 'addr': 0, 'access': 0,
                                           'funcs': set(), 'sites': []})
         site = start + i * 4
         entry['funcs'].add(site)
         entry['sites'].append(site)
-        following = words[i + 2]
-        if (following & STR_MASK) == STR_OP and (following & 0x1F) == reg:
-            entry['store'] += 1
-        elif (following & STR_MASK) == LDR_OP and (following & 0x1F) == reg:
-            entry['load'] += 1
-        else:
+        hit = False
+        for following in words[i + step + 1:i + step + 1 + args.window]:
+            op = following & STR_MASK
+            rt = following & 0x1F
+            rn = (following >> 5) & 0x1F
+            if op in (STR_OP, STUR_OP) and rt == reg:
+                entry['store'] += 1
+                hit = True
+            elif op in (LDR_OP, LDUR_OP) and rt == reg:
+                entry['load'] += 1
+                hit = True
+            elif op in (STP_OP, LDP_OP) and (rt == reg or ((following >> 10) & 0x1F) == reg):
+                entry['access'] += 1
+                hit = True
+            elif rn == reg:
+                entry['access'] += 1
+                hit = True
+        if not hit:
             entry['addr'] += 1
 
     export = {}
@@ -131,9 +153,10 @@ def main():
                 owners.add(f'0x{starts[index]:x}')
         record = {
             'section': entry['section'],
-            'refs': entry['store'] + entry['load'] + entry['addr'],
+            'refs': entry['store'] + entry['load'] + entry['addr'] + entry['access'],
             'store': entry['store'],
             'load': entry['load'],
+            'access': entry['access'],
             'addr': entry['addr'],
             'funcs': sorted(owners),
             'sites': [f'0x{s - base:x}' for s in entry['sites'][:20]],
@@ -153,7 +176,8 @@ def main():
         json.dump(export, f, ensure_ascii=False)
 
     stored = sum(entry['store'] for entry in refs.values())
-    total = sum(entry['store'] + entry['load'] + entry['addr'] for entry in refs.values())
+    total = sum(entry['store'] + entry['load'] + entry['addr'] + entry['access']
+                for entry in refs.values())
     print(f'[+] targets={len(export)} refs={total} stores={stored} '
           f'tables={tables} linked_vtables={linked} -> {out}')
 

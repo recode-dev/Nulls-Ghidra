@@ -8,6 +8,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="AST Fingerprint and Topology Classifier")
     p.add_argument('--code', required=True, help='Path to decompiled.c')
     p.add_argument('--out', default='index_data/fingerprints.json', help='Output JSON path')
+    p.add_argument('--base', type=lambda v: int(v, 0), default=0,
+                   help='image base, defaults to the top byte of the first address')
     return p.parse_args()
 
 def main():
@@ -20,7 +22,7 @@ def main():
     fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{', re.MULTILINE)
     matches = list(fn_pattern.finditer(text))
     first = int(matches[0].group(3), 16) if matches else 0
-    base = (first >> 32) << 32 if first >= 0x100000000 else 0
+    base = args.base or ((first >> 32) << 32 if first >= 0x100000000 else 0)
 
     field_re = re.compile(r'\b(?:arg\w*|this|p\w*Var\d+|iVar\d+|uVar\d+|pvVar\d+|puVar\d+)\s*(?:\+\s*|\-\>\s*|\.\s*|\[\s*)(0x[0-9a-fA-F]+|\d+)')
     ret_field_re = re.compile(r'return\s+\*\((\w+)\s*\*\)\(\w+\s*\+\s*(0x[0-9a-fA-F]+|\d+)\);')
@@ -29,7 +31,9 @@ def main():
     float_re = re.compile(r'\b\d+\.\d+(?:f)?\b')
     call_re = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
     loop_re = re.compile(r'\b(while|for|do)\b')
-    vt_re = re.compile(r'\*\((?:ulong|int64_t|code\s*\*)\s*\*\)\s*arg1\s*=\s*(?:aav\.)?(0x100[0-9a-fA-F]+);')
+    vt_re = re.compile(
+        r'\*\s*\(\s*[A-Za-z_][A-Za-z0-9_\s]*\*\s*\)\s*arg1\s*=\s*(?:aav\.)?(0x1[0-9a-fA-F]{8,15});'
+    )
 
     fingerprints = {}
 

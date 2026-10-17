@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
-      ver: ${{ steps.r.outputs.VER }}
+      ver: ${{ steps.g.outputs.VER || steps.r.outputs.VER }}
       size: ${{ steps.g.outputs.BINSIZE }}
       url_hash: ${{ steps.uh.outputs.URL_HASH }}
     steps:

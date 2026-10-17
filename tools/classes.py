@@ -55,16 +55,31 @@ def main():
 
     classes = {}
     for vt_addr, vt_data in vtables.items():
-        if vt_data.get('alias_of'):
+        if vt_data.get('alias_of') or vt_data.get('kind', 'vtable') != 'vtable':
             continue
         methods = vt_data.get('methods', [])
-        classes[f'VTableClass_{vt_addr}'] = {
+        header = vt_data.get('header') or {}
+        name = header.get('class_name') or f'VTableClass_{vt_addr}'
+        entry = {
             'vtable': vt_addr,
             'methods_count': len(methods),
             'methods': methods,
             'fields': class_fields(fps, methods),
             'aliases': len(vt_data.get('aliases', [])),
         }
+        if header.get('class_name'):
+            entry['typeinfo'] = header.get('typeinfo_name')
+        if vt_data.get('extends'):
+            entry['extends'] = vt_data['extends']
+        if vt_data.get('roles'):
+            entry['roles'] = vt_data['roles']
+        if name in classes:
+            existing = classes[name]
+            existing['methods'].extend(m for m in methods if m not in existing['methods'])
+            existing['methods_count'] = len(existing['methods'])
+            existing['aliases'] += 1
+        else:
+            classes[name] = entry
 
     offsets = sorted(int(k, 16) for k in fps)
     cluster = []

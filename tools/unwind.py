@@ -45,38 +45,59 @@ def main():
     with open(args.bin, 'rb') as f:
         data = f.read()
     info = section(data, '__unwind_info')
-    if info is None:
-        raise SystemExit('[-] no __unwind_info section')
-
-    blob = data[info['fileoff']:info['fileoff'] + info['size']]
-    version, _ce_off, _ce_count, _pa_off, _pa_count, index_off, index_count = struct.unpack_from('<7I', blob, 0)
-
-    index = [struct.unpack_from('<3I', blob, index_off + i * 12) for i in range(index_count)]
+    version = 0
     starts = set()
     lsda = set()
-    for i, (function_offset, page_off, lsda_off) in enumerate(index):
-        limit = index[i + 1][0] if i + 1 < len(index) else info['size']
-        record_off = lsda_off
-        while record_off + 8 <= len(blob):
-            function, _location = struct.unpack_from('<II', blob, record_off)
-            if function < function_offset or function >= limit:
+    if info is not None:
+        blob = data[info['fileoff']:info['fileoff'] + info['size']]
+        version, _ce_off, _ce_count, _pa_off, _pa_count, index_off, index_count = \
+            struct.unpack_from('<7I', blob, 0)
+
+        index = [struct.unpack_from('<3I', blob, index_off + i * 12) for i in range(index_count)]
+        for i, (function_offset, page_off, lsda_off) in enumerate(index):
+            limit = index[i + 1][0] if i + 1 < len(index) else info['size']
+            record_off = lsda_off
+            while record_off + 8 <= len(blob):
+                function, _location = struct.unpack_from('<II', blob, record_off)
+                if function < function_offset or function >= limit:
+                    break
+                lsda.add(function)
+                record_off += 8
+            for address in parse_page(blob, page_off, function_offset):
+                starts.add(address)
+
+    extra = set()
+    text = section(data, '__text')
+    eh = section(data, '__eh_frame')
+    if eh and text:
+        base = text['addr'] - text['fileoff']
+        table = data[eh['fileoff']:eh['fileoff'] + eh['size']]
+        off = 0
+        while off + 8 <= len(table):
+            length = struct.unpack_from('<I', table, off)[0]
+            if length in (0, 0xFFFFFFFF) or off + 4 + length > len(table):
                 break
-            lsda.add(function)
-            record_off += 8
-        for address in parse_page(blob, page_off, function_offset):
-            starts.add(address)
+            if struct.unpack_from('<I', table, off + 4)[0]:
+                delta = struct.unpack_from('<i', table, off + 8)[0]
+                address = eh['addr'] + off + 8 + delta
+                if text['addr'] <= address < text['addr'] + text['size']:
+                    extra.add(address - base)
+            off += 4 + length
+    starts |= extra
 
     payload = {
         'version': version,
         'count': len(starts),
         'starts': [f'0x{a:x}' for a in sorted(starts)],
         'lsda': [f'0x{a:x}' for a in sorted(lsda)],
+        'eh_frame': len(extra),
     }
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False)
 
-    print(f'[+] version={version} starts={len(starts)} lsda={len(lsda)} -> {args.out}')
+    print(f'[+] version={version} starts={len(starts)} eh_frame={len(extra)} '
+          f'lsda={len(lsda)} -> {args.out}')
 
 
 if __name__ == '__main__':

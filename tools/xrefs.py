@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import array
 import bisect
 import hashlib
 import json
@@ -7,6 +8,7 @@ import os
 import re
 import struct
 import subprocess
+import sys
 
 from binary import FAT_MAGICS, MH_MAGIC_64, detect_base, macho_sections
 
@@ -141,11 +143,14 @@ def arm64_text(data, offset=0):
 
 
 def adrp_string_xrefs(bin_path, functions, strings):
-    """Resolve string references via ADRP+ADD pairs in arm64 __TEXT.__text.
+    """Resolve string references from arm64 code by decoding literal addresses.
 
     r2ghidra renders most cstrings as a raw pointer constant (0x100xxxxxx), so
-    STR_RE alone misses them. This pass decodes ADRP+ADD and attributes the
-    referenced string back to the enclosing function.
+    STR_RE alone misses them. Three access shapes are decoded and attributed to
+    the enclosing function:
+      ADRP+ADD            -> address of the literal itself
+      ADRP+LDR            -> pointer stored in a literal/objc slot
+      ADRP+LDR+LDR        -> CFString struct whose +0x10 field is the cstring
     """
     with open(bin_path, 'rb') as f:
         data = f.read()
@@ -154,6 +159,15 @@ def adrp_string_xrefs(bin_path, functions, strings):
         return {}
     blob, text_addr = located
     addr_to_string = {v['address']: k for k, v in strings.items() if v.get('address')}
+    segments = macho_sections(data)
+    for section in segments:
+        if section['sect'] != '__cfstring' or not section['size']:
+            continue
+        for struct_addr in range(section['addr'], section['addr'] + section['size'] - 31, 32):
+            text_ptr = struct.unpack_from('<Q', data, section['fileoff'] + struct_addr - section['addr'] + 16)[0]
+            text_ = addr_to_string.get(text_ptr)
+            if text_:
+                addr_to_string.setdefault(struct_addr, text_)
 
     starts = sorted((v['address'], k) for k, v in functions.items() if v.get('address'))
     start_addrs = [s[0] for s in starts]
@@ -164,11 +178,21 @@ def adrp_string_xrefs(bin_path, functions, strings):
             return None
         return starts[i][1]
 
+    def deref(address):
+        for section in segments:
+            if section['addr'] <= address < section['addr'] + section['size']:
+                off = section['fileoff'] + address - section['addr']
+                if 0 <= off <= len(data) - 8:
+                    return struct.unpack_from('<Q', data, off)[0]
+                break
+        return None
+
     result = {}
     off = 0
     limit = len(blob) - 3
     while off < limit:
         ins = struct.unpack_from('<I', blob, off)[0]
+        site = off
         off += 4
         if (ins & 0x9F000000) != 0x90000000:  # ADRP
             continue
@@ -178,24 +202,38 @@ def adrp_string_xrefs(bin_path, functions, strings):
         imm = (immhi << 2) | immlo
         if imm & (1 << 20):
             imm -= (1 << 21)
-        page = ((text_addr + off - 4) & ~0xFFF) + (imm << 12)
-        for q in range(off, min(off + 16, limit), 4):
+        page = ((text_addr + site) & ~0xFFF) + (imm << 12)
+        target = None
+        for q in range(off, min(off + 32, limit), 4):
             ins2 = struct.unpack_from('<I', blob, q)[0]
-            # ADD (immediate, 64-bit): add xN, xN, #imm12[, lsl 12]
             if (ins2 & 0xFF000000) == 0x91000000 and ((ins2 >> 5) & 0x1F) == rd:
+                # ADD (immediate, 64-bit): add xN, xN, #imm12[, lsl 12]
                 lo12 = (ins2 >> 10) & 0xFFF
                 if (ins2 >> 22) & 0x1:
                     lo12 <<= 12
                 target = (page + lo12) & 0xFFFFFFFFFFFFFFFF
+            elif (ins2 & 0xFFC00000) == 0xF9400000 and ((ins2 >> 5) & 0x1F) == rd:
+                # LDR (immediate, 64-bit): ldr xN, [xN, #imm12 * 8]
+                slot = page + ((ins2 >> 10) & 0xFFF) * 8
+                value = deref(slot)
+                if value and value in addr_to_string:
+                    target = value
+                elif value:
+                    inner = deref(value + 16)
+                    if inner in addr_to_string:
+                        target = inner
             else:
                 continue
-            text_ = addr_to_string.get(target)
-            if text_ is None:
-                continue
-            key = func_for(text_addr + off - 4)
-            if key:
-                result.setdefault(text_, set()).add(key)
-            break
+            if target is not None:
+                break
+        else:
+            continue
+        text_ = addr_to_string.get(target)
+        if text_ is None:
+            continue
+        key = func_for(text_addr + site)
+        if key:
+            result.setdefault(text_, set()).add(key)
     return result
 
 
@@ -231,7 +269,7 @@ def section_of(sections, address):
     return None
 
 
-def parse_code(code_path, base, image_size, max_field, sections, unwind_starts):
+def parse_code(code_path, base, image_size, max_field, sections, unwind_starts, prologue_starts=None):
     with open(code_path, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
@@ -319,23 +357,25 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts):
         for ref in sorted(refs):
             data_refs.setdefault(f'0x{ref:x}', []).append(key)
 
-    # Merge __unwind_info starts that r2ghidra did not emit as separate
-    # functions, so every authoritative boundary is searchable in the index.
+    # Merge __unwind_info starts and stack-frame prologues that r2ghidra did
+    # not emit as separate functions, so every real boundary is in the index.
+    prologue_starts = prologue_starts or set()
+    starts = set(unwind_starts) | set(prologue_starts)
     known_offsets = {int(k, 16) for k in functions}
-    for rva in unwind_starts:
+    for rva in sorted(starts):
         if rva in known_offsets:
             continue
         address = base + rva
-        functions[f'0x{rva:x}'] = make_stub(rva, address, section_of(sections, address))
+        entry = make_stub(rva, address, section_of(sections, address))
+        entry['unwind'] = rva in unwind_starts
+        if rva in prologue_starts:
+            entry['prologue'] = True
+        functions[f'0x{rva:x}'] = entry
 
     by_section = {}
     for entry in functions.values():
         if entry['section']:
             by_section.setdefault(entry['section'], set()).add(entry['offset'])
-    for rva in unwind_starts:
-        section = section_of(sections, base + rva)
-        if section:
-            by_section.setdefault(f"{section['seg']}.{section['sect']}", set()).add(rva)
     ends = {f"{s['seg']}.{s['sect']}": s['addr'] + s['size'] - base for s in sections}
     for name, offsets in by_section.items():
         ordered = sorted(offsets)
@@ -388,12 +428,65 @@ def main():
     if os.path.exists(unwind_path):
         with open(unwind_path) as f:
             unwind_starts = {int(v, 16) for v in json.load(f).get('starts', [])}
+    with open(args.bin, 'rb') as f:
+        raw = f.read()
+    prologue_starts = set()
+    thin_starts = set()
+    located = arm64_text(raw)
+    if located:
+        blob, text_addr = located
+        words = array.array('I')
+        words.frombytes(blob[:len(blob) & ~3])
+        if sys.byteorder != 'little':
+            words.byteswap()
+        ret = 0xD65F03C0
+        for i in range(1, len(words)):
+            word = words[i]
+            framed = ((word & 0xFF8003FF) in (0xD10003FF, 0xD14003FF)
+                      or ((word & 0xFFC00000) == 0xA9800000 and ((word >> 5) & 0x1F) == 31))
+            if not framed and word != ret:
+                continue
+            prev = words[i - 1]
+            boundary = prev == ret or prev == 0xD503245F or (prev & 0xFC000000) == 0x14000000
+            if not boundary and prev == 0xD503201F and i > 1:
+                earlier = words[i - 2]
+                boundary = earlier == ret or (earlier & 0xFC000000) == 0x14000000
+            if boundary:
+                (prologue_starts if framed else thin_starts).add(text_addr + i * 4 - base)
+        code_lo = text_addr
+        code_hi = text_addr + len(blob)
+        pointed = set()
+        for section in macho_sections(raw):
+            if section['sect'] == '__text' or not section['size'] or not section['fileoff']:
+                continue
+            start = section['fileoff']
+            for off in range(start, start + section['size'] - 7, 8):
+                value = struct.unpack_from('<Q', raw, off)[0]
+                if not value:
+                    continue
+                for mask in ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1):
+                    if code_lo <= (value & mask) < code_hi:
+                        pointed.add(value & mask)
+                        break
+        for address in pointed:
+            index = (address - text_addr) >> 2
+            if index <= 0 or index >= len(words) or address & 3:
+                continue
+            prev = words[index - 1]
+            if prev == ret or (prev & 0xFC000000) == 0x14000000:
+                thin_starts.add(address - base)
+    prologue_starts |= thin_starts
+
     functions, strings_xref, data_refs, edges = parse_code(args.code, base, image_size,
                                                            args.max_field_offset, sections,
-                                                           unwind_starts)
+                                                           unwind_starts, prologue_starts)
+    for rva in thin_starts:
+        entry = functions.get(f'0x{rva:x}')
+        if entry:
+            entry.pop('prologue', None)
+            entry['thin'] = True
     strings = bin_strings(args.bin, args.min_string)
-    with open(args.bin, 'rb') as f:
-        all_sections = macho_sections(f.read())
+    all_sections = macho_sections(raw)
     for entry in strings.values():
         fileoff = entry.pop('offset')
         entry['address'] = string_vmaddr(all_sections, fileoff) or base + fileoff
@@ -417,7 +510,8 @@ def main():
     sizes = [v['size_bytes'] for v in functions.values() if v['size_bytes']]
     unresolved = sum(len(v['unresolved_calls']) for v in functions.values())
     outside = sum(1 for v in functions.values() if v['section'] is None)
-    print(f'[+] base=0x{base:x} functions={len(functions)} outside_sections={outside} edges={len(edges)} '
+    print(f'[+] base=0x{base:x} functions={len(functions)} prologue={len(prologue_starts)} '
+          f'outside_sections={outside} edges={len(edges)} '
           f'strings={len(strings)} data_refs={len(data_refs)} '
           f'unresolved={unresolved} median_size={sorted(sizes)[len(sizes) // 2] if sizes else 0} '
           f'-> {args.out}')
