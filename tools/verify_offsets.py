@@ -3,10 +3,15 @@ import argparse
 import json
 import os
 import re
-import sys
+import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import diff_versions as resolver
+ENTRY_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_:]{1,80})\s*[:=]\s*(?:ptr\()?\s*[\'"]?(0x[0-9a-fA-F]+|\d+)')
+DEFINE_RE = re.compile(r'#define\s+([A-Za-z_][A-Za-z0-9_:]{1,80})\s+(0x[0-9a-fA-F]+|\d+)')
+PAIR_RE = re.compile(r'\[\s*"([A-Za-z_][A-Za-z0-9_:]{1,80})"\s*,\s*(0x[0-9a-fA-F]+|\d+)')
+GETTER_TOKENS = ('get', 'is', 'has', 'can', 'should', 'width', 'height', 'radius', 'speed',
+                 'index', 'count', 'team', 'owner', 'data', 'id', 'pos', 'x', 'y', 'z')
+ACTIVE_TOKENS = ('update', 'tick', 'process', 'handle', 'render', 'draw', 'calculate', 'movement',
+                 'activate', 'send', 'receive', 'load', 'save', 'init', 'enter', 'setup')
 
 
 def parse_args():
@@ -17,13 +22,74 @@ def parse_args():
     return p.parse_args()
 
 
+def read_source(src):
+    if not src:
+        return None
+    if src.startswith(('http://', 'https://')):
+        req = urllib.request.Request(src, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp:
+            return resp.read().decode('utf-8', errors='ignore')
+    if os.path.exists(src):
+        with open(src, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    return src
+
+
+def parse_entries(text):
+    entries = {}
+    for pat in (DEFINE_RE, PAIR_RE, ENTRY_RE):
+        for m in pat.finditer(text):
+            name = m.group(1)
+            token = m.group(2)
+            value = int(token, 16) if token.lower().startswith('0x') else int(token)
+            if name not in entries:
+                entries[name] = value
+    return entries
+
+
+def infer_kind(name):
+    tokens = [t for t in re.split(r'[_,:\s]+', name) if t]
+    lowered = [t.lower() for t in tokens]
+    if len(tokens) >= 2 and lowered[-1] == lowered[0]:
+        return 'constructor'
+    if any(token.endswith('ctor') or token in ('new', 'create', 'init', 'construct') for token in lowered):
+        return 'constructor'
+    if any(token in GETTER_TOKENS for token in lowered):
+        return 'getter'
+    if any(token in ACTIVE_TOKENS for token in lowered):
+        return 'action'
+    return 'unknown'
+
+
+def verify(kind, name, rva, functions):
+    entry = functions.get(f'0x{rva:x}')
+    if entry is None:
+        entry = functions.get(hex(rva))
+    if not entry:
+        return False, 'not-a-function-start'
+    lines = entry.get('lines', 0)
+    calls = entry.get('calls', [])
+    fields = entry.get('field_offsets', [])
+    vtable = entry.get('vtables_assigned', [])
+    if kind == 'getter':
+        if lines > 60:
+            return False, f'getter-like name but {lines} lines'
+        if not fields and not calls:
+            return False, 'getter-like name but no field access'
+    if kind == 'action' and not calls:
+        return False, 'action-like name but no calls'
+    if kind == 'constructor' and not vtable and not calls:
+        return False, 'constructor-like name but no vtable/calls'
+    return True, 'structural-check-passed'
+
+
 def main():
     args = parse_args()
-    text = resolver.read_source(args.resolved)
+    text = read_source(args.resolved)
     if text is None:
         print(f'[-] cannot read {args.resolved}')
         raise SystemExit(1)
-    entries = resolver.parse_entries(text)
+    entries = parse_entries(text)
 
     fn_path = os.path.join(args.index_dir, 'functions.json')
     if not os.path.exists(fn_path):
@@ -45,8 +111,8 @@ def main():
             failed.append((name, value, 'ambiguous: both a function start and a field offset'))
             continue
         if in_keys:
-            kind = resolver.infer_kind(name)
-            ok, detail = resolver.verify(kind, name, value, functions)
+            kind = infer_kind(name)
+            ok, detail = verify(kind, name, value, functions)
             if not ok:
                 failed.append((name, value, detail))
                 continue

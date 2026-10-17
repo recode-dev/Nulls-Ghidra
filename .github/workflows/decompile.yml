@@ -6,12 +6,6 @@ on:
       url:
         description: direct archive or binary URL (any game)
         default: ''
-      diff_offsets_url:
-        description: URL or raw text of a reference offsets map (C / JS / TS / JSON)
-        default: ''
-      reference_url:
-        description: URL of a reference build (APK / IPA / zip / ELF or Mach-O) to decompile alongside the target
-        default: ''
       symbolize:
         description: generate IDA / Ghidra / radare2 symbol maps
         type: boolean
@@ -173,35 +167,9 @@ jobs:
             --index_dir index_data \
             --out_dir symbols_out
 
-      - if: ${{ inputs.diff_offsets_url != '' }}
-        run: |
-          python3 tools/diff_versions.py \
-            --old_offsets "${{ inputs.diff_offsets_url }}" \
-            --new_index index_data \
-            --out "offsets_${{ needs.fetch.outputs.ver }}.js" \
-            --out_md Diffed_Offsets.md
-
       - run: |
           python3 tools/search.py --index_dir index_data --role root_update_loop 2>/dev/null | head -5 || true
           python3 tools/search.py --index_dir index_data --field 0x8 | head -5 || true
-
-      - if: ${{ inputs.diff_offsets_url != '' }}
-        run: |
-          python3 tools/offset_finder.py \
-            --names "${{ inputs.diff_offsets_url }}" \
-            --binary "$BIN" \
-            --index_dir index_data \
-            --code decompiled.c \
-            --report resolution_report.md \
-            --out resolved_offsets.js
-
-      - if: ${{ inputs.diff_offsets_url != '' }}
-        run: |
-          python3 tools/verify_offsets.py \
-            --resolved resolved_offsets.js \
-            --index_dir index_data \
-            --out verified_offsets.md
-          cat verified_offsets.md >> "$GITHUB_STEP_SUMMARY"
 
       - if: always()
         run: |
@@ -225,14 +193,6 @@ jobs:
             echo "| Strings | $(count index_data/strings.json) |"
             echo "| Classes | $(count index_data/classes.json) |"
             echo "| Symbols | $(count symbols_out/symbols.json) |"
-            if [ -f resolution_report.md ]; then
-              echo "### Offset resolution (binary validated)"
-              grep -E '^- |^\*\*' resolution_report.md | tail -8
-            fi
-            if [ -f Diffed_Offsets.md ]; then
-              echo "### Auto Diffed Offsets"
-              cat Diffed_Offsets.md
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -242,54 +202,6 @@ jobs:
           path: |
             index_data/
             symbols_out/
-            Diffed_Offsets.md
-            resolution_report.md
-            resolved_offsets.js
-            offsets_*.js
             decompiled.c
           retention-days: 30
           if-no-files-found: warn
-
-  ref_dump:
-    if: ${{ inputs.reference_url != '' }}
-    runs-on: macos-14
-    timeout-minutes: 350
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: fetch and extract reference binary
-        env:
-          BINARY_URL: ${{ inputs.reference_url }}
-          OUT_BIN: ref_binary
-          IPA_CACHE_DIR: ref_ipa_cache
-          EXTRACT_DIR: ref_extract
-          VERSION_FILE: ref_version.txt
-        run: bash tools/fetch.sh
-
-      - run: bash tools/r2setup.sh
-
-      - name: decompile reference
-        env:
-          BIN: ref_binary
-          BUDGET: ${{ inputs.seconds || '18000' }}
-          R2PROJ: ref_r2proj
-          CODE_OUT: ref_decompiled.c
-          META_OUT: ref_functions.json
-          ENGINE_OUT: ref_engine.txt
-          R2_LOG: ref_r2.log
-        run: |
-          PHASE=analyze bash tools/decomp.sh
-          bash tools/decomp.sh
-
-      - name: check reference output
-        run: |
-          test -s ref_decompiled.c
-          echo "ref decompiled.c: $(wc -c < ref_decompiled.c | tr -d ' ') bytes, $(grep -c '^{$' ref_decompiled.c || true) function bodies"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: reference_binary
-          path: |
-            ref_decompiled.c
-            ref_functions.json
-            ref_version.txt
