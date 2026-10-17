@@ -6,18 +6,6 @@ on:
       url:
         description: direct archive or binary URL (any game)
         default: ''
-      xrefs:
-        description: extract functions, strings, xrefs, call graph and vtables
-        type: boolean
-        default: true
-      fingerprint:
-        description: extract structural fingerprints
-        type: boolean
-        default: true
-      reconstruct_classes:
-        description: reconstruct C++ classes
-        type: boolean
-        default: true
       seconds:
         description: total analysis budget in seconds
         default: '18000'
@@ -36,7 +24,7 @@ concurrency:
 
 jobs:
   fetch:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
       ver: ${{ steps.r.outputs.VER }}
@@ -78,7 +66,7 @@ jobs:
 
   dump:
     needs: fetch
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -137,45 +125,38 @@ jobs:
           echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
           test "${bodies:-0}" -gt 0
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
-        run: |
+      - run: |
           python3 tools/unwind.py \
             --bin "$BIN" \
             --out index_data/unwind.json
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
-        run: |
+      - run: |
           python3 tools/xrefs.py \
             --bin "$BIN" \
             --code decompiled.c \
             --out index_data
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
-        run: |
+      - run: |
           python3 tools/vtables.py \
             --bin "$BIN" \
             --index_dir index_data
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
-        run: |
+      - run: |
           python3 tools/fields.py \
             --code decompiled.c \
             --out index_data/fields.json
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
-        run: |
+      - run: |
           python3 tools/ctors.py \
             --bin "$BIN" \
             --index_dir index_data
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.fingerprint }}
-        run: |
+      - run: |
           python3 tools/fingerprint.py \
             --code decompiled.c \
             --out index_data/fingerprints.json
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.reconstruct_classes }}
-        run: |
+      - run: |
           python3 tools/classes.py \
             --index_dir index_data \
             --out index_data/classes.json

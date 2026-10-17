@@ -83,20 +83,40 @@ def mark_aliases(vtables):
             canonical[key] = address
 
 
-def mark_prefixes(vtables, depth=3):
+def mark_prefixes(vtables):
     heads = {}
     for address, entry in vtables.items():
-        if entry.get('alias_of') or len(entry['methods']) < depth:
+        if entry.get('alias_of'):
             continue
-        heads.setdefault(tuple(entry['methods'][:depth]), []).append(address)
-    for group in heads.values():
-        if len(group) < 2:
+        methods = entry['methods']
+        for depth in range(2, min(len(methods), 8) + 1):
+            heads.setdefault(tuple(methods[:depth]), []).append(address)
+    for address, entry in vtables.items():
+        if entry.get('alias_of'):
             continue
-        group.sort(key=lambda a: -vtables[a]['slots'])
-        base = group[0]
-        for address in group[1:]:
-            vtables[address]['extends'] = base
-            vtables[address]['shared_prefix'] = depth
+        methods = entry['methods']
+        for depth in range(min(len(methods), 8), 1, -1):
+            group = heads.get(tuple(methods[:depth]))
+            if not group:
+                continue
+            candidates = [a for a in group if a != address and vtables[a]['slots'] >= depth]
+            if candidates:
+                candidates.sort(key=lambda a: -vtables[a]['slots'])
+                entry['extends'] = candidates[0]
+                entry['shared_prefix'] = depth
+                break
+
+
+def header_of(data, address, base, data_ranges):
+    if address - base < 16:
+        return None
+    offset_to_top = struct.unpack_from('<i', data, address - base - 16)[0]
+    typeinfo = struct.unpack_from('<Q', data, address - base - 8)[0]
+    info_ok = typeinfo == 0 or any(lo <= typeinfo < hi for lo, hi in data_ranges)
+    if info_ok and -0x10000 < offset_to_top <= 0:
+        return {'offset_to_top': offset_to_top,
+                'typeinfo': f'0x{typeinfo:x}' if typeinfo else None}
+    return None
 
 
 def main():
@@ -120,8 +140,11 @@ def main():
         data = f.read()
     base = detect_base(args.bin)
 
+    sections = data_sections(data)
+    data_ranges = [(section['addr'], section['addr'] + section['size']) for section in sections]
+    function_keys = {f'0x{v["offset"]:x}' for v in functions.values()}
     vtables = {}
-    for section in data_sections(data):
+    for section in sections:
         for address, methods in scan_section(data, section, base, starts_set, args.min_slots).items():
             roles = roles_of(fingerprints, methods)
             entry = {
@@ -130,9 +153,16 @@ def main():
                 'slots': len(methods),
                 'methods': [f'0x{m:x}' for m in methods],
                 'chars': sum(functions.get(f'0x{m:x}', {}).get('size_chars', 0) for m in methods),
+                'bytes': len(methods) * 8,
             }
             if any(roles):
                 entry['roles'] = roles
+            shadow = [i for i, m in enumerate(methods) if f'0x{m:x}' not in function_keys]
+            if shadow:
+                entry['shadow'] = shadow
+            header = header_of(data, address, base, data_ranges)
+            if header:
+                entry['header'] = header
             vtables[address] = entry
 
     mark_aliases(vtables)
@@ -153,10 +183,12 @@ def main():
     unique = [v for v in vtables.values() if not v.get('alias_of')]
     slots = sum(v['slots'] for v in vtables.values())
     inherited = sum(1 for v in unique if v.get('extends'))
+    shadows = sum(len(v.get('shadow', [])) for v in vtables.values())
+    headers = sum(1 for v in vtables.values() if v.get('header'))
     biggest = max(vtables.values(), key=lambda v: v['slots']) if vtables else None
     print(f'[+] vtables={len(vtables)} slots={slots} signatures={len(unique)} '
           f'aliases={len(vtables) - len(unique)} extends={inherited} '
-          f'starts={len(starts)} '
+          f'starts={len(starts)} shadow={shadows} headers={headers} '
           f'max={biggest["slots"] if biggest else 0}@{biggest["address"] if biggest else "-"} -> {out}')
 
 
