@@ -279,7 +279,7 @@ jobs:
           if-no-files-found: warn
 
   ref_dump:
-    if: ${{ inputs.reference_url != '' }}
+    if: ${{ inputs.reference_url != '' || vars.REFERENCE_URL != '' }}
     runs-on: macos-14
     timeout-minutes: 350
     steps:
@@ -287,7 +287,7 @@ jobs:
 
       - name: fetch reference build
         env:
-          REF_URL: ${{ inputs.reference_url }}
+          REF_URL: ${{ inputs.reference_url || vars.REFERENCE_URL }}
         run: |
           set -euo pipefail
           mkdir -p ref_in
