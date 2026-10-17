@@ -475,6 +475,7 @@ def main():
             prev = words[index - 1]
             if prev == ret or (prev & 0xFC000000) == 0x14000000:
                 thin_starts.add(address - base)
+    thin_starts -= prologue_starts
     prologue_starts |= thin_starts
 
     functions, strings_xref, data_refs, edges = parse_code(args.code, base, image_size,
