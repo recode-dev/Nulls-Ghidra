@@ -138,24 +138,24 @@ jobs:
             --out index_data
 
       - run: |
-          python3 tools/vtables.py \
-            --bin "$BIN" \
-            --index_dir index_data
-
-      - run: |
           python3 tools/fields.py \
             --code decompiled.c \
             --out index_data/fields.json
 
       - run: |
-          python3 tools/ctors.py \
+          python3 tools/fingerprint.py \
+            --code decompiled.c \
+            --out index_data/fingerprints.json
+
+      - run: |
+          python3 tools/vtables.py \
             --bin "$BIN" \
             --index_dir index_data
 
       - run: |
-          python3 tools/fingerprint.py \
-            --code decompiled.c \
-            --out index_data/fingerprints.json
+          python3 tools/ctors.py \
+            --bin "$BIN" \
+            --index_dir index_data
 
       - run: |
           python3 tools/classes.py \

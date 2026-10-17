@@ -11,7 +11,7 @@ from binary import detect_base, macho_sections
 PTR_MASKS = ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1)
 ADRP_MASK = 0x9F000000
 ADRP_OP = 0x90000000
-ADD_MASK = 0xFF800000
+ADD_MASK = 0xFF000000
 ADD_OP = 0x91000000
 STR_MASK = 0xFFC00000
 STR_OP = 0xF9000000
