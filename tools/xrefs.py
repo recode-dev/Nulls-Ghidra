@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import bisect
 import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 
-from binary import detect_base, macho_sections
+from binary import FAT_MAGICS, MH_MAGIC_64, detect_base, macho_sections
 
 FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
@@ -80,6 +82,121 @@ def depth_of(body):
         elif char == '}':
             level -= 1
     return max(0, deepest - 1)
+
+
+def make_stub(rva, address, section):
+    return {
+        'name': f'unwind.{rva:x}',
+        'address': address,
+        'offset': rva,
+        'return_type': '',
+        'signature': f'unwind.{rva:x} ()',
+        'args': 0,
+        'section': f"{section['seg']}.{section['sect']}" if section else None,
+        'size_bytes': None,
+        'unwind': True,
+        'size_chars': 0,
+        'lines': 0,
+        'depth': 0,
+        'loops': 0,
+        'branches': 0,
+        'switches': 0,
+        'hash': '',
+        'strings': [],
+        'calls': [],
+        'call_sites': {},
+        'callers': [],
+        'unresolved_calls': [],
+        'field_offsets': [],
+        'field_writes': [],
+        'consts': [],
+        'data_refs': [],
+        'floats': [],
+    }
+
+
+def arm64_text(data, offset=0):
+    """Return (blob, vmaddr) of __TEXT.__text for the arm64 slice, or None."""
+    if len(data) < offset + 32:
+        return None
+    magic = struct.unpack_from('<I', data, offset)[0]
+    be = struct.unpack_from('>I', data, offset)[0]
+    if magic in FAT_MAGICS or be in FAT_MAGICS:
+        n = struct.unpack_from('>I', data, offset + 4)[0]
+        for i in range(n):
+            arch_off = struct.unpack_from('>I', data, offset + 8 + i * 20 + 8)[0]
+            found = arm64_text(data, arch_off)
+            if found:
+                return found
+        return None
+    if magic != MH_MAGIC_64:
+        return None
+    cputype = struct.unpack_from('<i', data, offset + 4)[0]
+    if cputype != 0x0100000c:  # CPU_TYPE_ARM64
+        return None
+    for section in macho_sections(data, offset):
+        if section['sect'] == '__text' and section['size'] and (section['flags'] & 0x80000000):
+            return data[section['fileoff']:section['fileoff'] + section['size']], section['addr']
+    return None
+
+
+def adrp_string_xrefs(bin_path, functions, strings):
+    """Resolve string references via ADRP+ADD pairs in arm64 __TEXT.__text.
+
+    r2ghidra renders most cstrings as a raw pointer constant (0x100xxxxxx), so
+    STR_RE alone misses them. This pass decodes ADRP+ADD and attributes the
+    referenced string back to the enclosing function.
+    """
+    with open(bin_path, 'rb') as f:
+        data = f.read()
+    located = arm64_text(data)
+    if located is None:
+        return {}
+    blob, text_addr = located
+    addr_to_string = {v['address']: k for k, v in strings.items() if v.get('address')}
+
+    starts = sorted((v['address'], k) for k, v in functions.items() if v.get('address'))
+    start_addrs = [s[0] for s in starts]
+
+    def func_for(addr):
+        i = bisect.bisect_right(start_addrs, addr) - 1
+        if i < 0:
+            return None
+        return starts[i][1]
+
+    result = {}
+    off = 0
+    limit = len(blob) - 3
+    while off < limit:
+        ins = struct.unpack_from('<I', blob, off)[0]
+        off += 4
+        if (ins & 0x9F000000) != 0x90000000:  # ADRP
+            continue
+        rd = ins & 0x1F
+        immlo = (ins >> 29) & 0x3
+        immhi = (ins >> 5) & 0x7FFFF
+        imm = (immhi << 2) | immlo
+        if imm & (1 << 20):
+            imm -= (1 << 21)
+        page = ((text_addr + off - 4) & ~0xFFF) + (imm << 12)
+        for q in range(off, min(off + 16, limit), 4):
+            ins2 = struct.unpack_from('<I', blob, q)[0]
+            # ADD (immediate, 64-bit): add xN, xN, #imm12[, lsl 12]
+            if (ins2 & 0xFF000000) == 0x91000000 and ((ins2 >> 5) & 0x1F) == rd:
+                lo12 = (ins2 >> 10) & 0xFFF
+                if (ins2 >> 22) & 0x1:
+                    lo12 <<= 12
+                target = (page + lo12) & 0xFFFFFFFFFFFFFFFF
+            else:
+                continue
+            text_ = addr_to_string.get(target)
+            if text_ is None:
+                continue
+            key = func_for(text_addr + off - 4)
+            if key:
+                result.setdefault(text_, set()).add(key)
+            break
+    return result
 
 
 def parse_args_list(raw):
@@ -202,6 +319,15 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts):
         for ref in sorted(refs):
             data_refs.setdefault(f'0x{ref:x}', []).append(key)
 
+    # Merge __unwind_info starts that r2ghidra did not emit as separate
+    # functions, so every authoritative boundary is searchable in the index.
+    known_offsets = {int(k, 16) for k in functions}
+    for rva in unwind_starts:
+        if rva in known_offsets:
+            continue
+        address = base + rva
+        functions[f'0x{rva:x}'] = make_stub(rva, address, section_of(sections, address))
+
     by_section = {}
     for entry in functions.values():
         if entry['section']:
@@ -261,6 +387,11 @@ def main():
     strings = bin_strings(args.bin, args.min_string)
     for entry in strings.values():
         entry['address'] = base + entry.pop('offset')
+
+    for text_, keys in adrp_string_xrefs(args.bin, functions, strings).items():
+        merged = set(strings_xref.get(text_, []))
+        merged.update(keys)
+        strings_xref[text_] = sorted(merged)
 
     outputs = {
         'functions.json': functions,
