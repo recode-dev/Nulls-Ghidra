@@ -6,8 +6,8 @@ on:
       url:
         description: direct archive or binary URL (any game)
         default: ''
-      extract_all:
-        description: extract strings, xrefs, and call graphs
+      xrefs:
+        description: extract functions, strings, xrefs, call graph and vtables
         type: boolean
         default: true
       fingerprint:
@@ -123,12 +123,12 @@ jobs:
         env:
           PHASE: analyze
           BUDGET: ${{ inputs.seconds || '18000' }}
-        run: bash tools/decomp.sh
+        run: bash tools/decompile.sh
 
       - if: ${{ steps.state.outputs.code != 'ready' }}
         env:
           BUDGET: ${{ inputs.seconds || '18000' }}
-        run: bash tools/decomp.sh
+        run: bash tools/decompile.sh
 
       - if: always()
         run: |
@@ -137,13 +137,18 @@ jobs:
           echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
           test "${bodies:-0}" -gt 0
 
-      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.extract_all }}
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
         run: |
-          python3 tools/extract_all.py \
+          python3 tools/xrefs.py \
             --bin "$BIN" \
             --code decompiled.c \
-            --out index_data \
-            --ver "${{ needs.fetch.outputs.ver }}"
+            --out index_data
+
+      - if: ${{ github.event_name != 'workflow_dispatch' || inputs.xrefs }}
+        run: |
+          python3 tools/vtables.py \
+            --bin "$BIN" \
+            --index_dir index_data
 
       - if: ${{ github.event_name != 'workflow_dispatch' || inputs.fingerprint }}
         run: |
