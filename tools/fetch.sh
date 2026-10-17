@@ -27,9 +27,9 @@ else
   for SRC in ${SOURCE_URLS:-}; do
     for _ in 1 2 3; do
       LOC=$(loc_redirect "$SRC" || true)
-      case "$LOC" in *.ipa|*.apk|*.zip) break ;; esac
+      case "$LOC" in *.ipa|*.zip) break ;; esac
       LOC=$(loc_page "$SRC" || true)
-      case "$LOC" in *.ipa|*.apk|*.zip) break ;; esac
+      case "$LOC" in *.ipa|*.zip) break ;; esac
       LOC=""
       sleep 5
     done
@@ -72,7 +72,7 @@ fi
 WORK=${EXTRACT_DIR:-extract}
 rm -rf "$WORK"
 mkdir -p "$WORK"
-if file -b "$CACHE/archive" | grep -qE 'Mach-O|ELF'; then
+if file -b "$CACHE/archive" | grep -qE 'Mach-O'; then
   cp "$CACHE/archive" "$WORK/direct.bin"
 else
   unzip -oq "$CACHE/archive" -d "$WORK"
@@ -95,7 +95,7 @@ while IFS= read -r f; do
   esac
   DESC=$(file -b "$f" 2>/dev/null || true)
   case "$DESC" in
-    *Mach-O*|*ELF*) echo "$(wc -c < "$f" | tr -d ' ') $f" >> "$BINARIES" ;;
+    *Mach-O*) echo "$(wc -c < "$f" | tr -d ' ') $f" >> "$BINARIES" ;;
   esac
 done < "$CANDS"
 sort -rn "$BINARIES" 2>/dev/null | head -5
@@ -107,7 +107,7 @@ fi
 
 rm -f "$OUT"
 PICK=""
-if [ -n "$EXEC" ] && [ -f "$ROOT/$EXEC" ] && file -b "$ROOT/$EXEC" 2>/dev/null | grep -qE 'Mach-O|ELF'; then
+if [ -n "$EXEC" ] && [ -f "$ROOT/$EXEC" ] && file -b "$ROOT/$EXEC" 2>/dev/null | grep -qE 'Mach-O'; then
   PICK="$ROOT/$EXEC"
   echo "pick exec $EXEC"
 elif [ -s "$BINARIES" ]; then

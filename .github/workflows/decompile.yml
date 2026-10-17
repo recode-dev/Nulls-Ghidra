@@ -162,10 +162,6 @@ jobs:
             --index_dir index_data \
             --out index_data/classes.json
 
-      - run: |
-          python3 tools/search.py --index_dir index_data --role root_update_loop 2>/dev/null | head -5 || true
-          python3 tools/search.py --index_dir index_data --field 0x8 | head -5 || true
-
       - if: always()
         run: |
           count() {
