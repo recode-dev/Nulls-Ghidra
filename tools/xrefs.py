@@ -16,6 +16,9 @@ FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
 )
 CALL_RE = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
+GENERIC_FUNC_RE = re.compile(
+    r'\n([A-Za-z0-9_* ]+?)\s+([A-Za-z_$][A-Za-z0-9_.$]*)\s*\(([^)]*)\)\s*\n?\s*\{'
+)
 NAME_CALL_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(')
 VCALL_RE = re.compile(
     r'\*\*\s*\(\s*code\s*\*\s*\*\s*\)\s*\(\s*\*?\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*'
@@ -282,29 +285,29 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
         text = f.read()
 
     name_map = name_map or {}
-    func_re = FUNC_RE
+    found = [(m.start(), m.group(1), m.group(2), m.group(3), m.group(4))
+             for m in FUNC_RE.finditer(text)]
     if name_map:
-        # only symbols we actually know: a loose pattern would eat 'else if (...) {'
-        names = '|'.join(sorted((re.escape(n) for n in name_map), key=len, reverse=True))
-        func_re = re.compile(
-            r'\n([A-Za-z0-9_* ]+?)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+)|(?:' + names + r'))'
-            r'\s*\(([^)]*)\)\s*\n?\s*\{'
-        )
-    matches = list(func_re.finditer(text))
+        # symbol headers carry no address, so match them by name and resolve
+        for m in GENERIC_FUNC_RE.finditer(text):
+            if m.group(2) in name_map:
+                found.append((m.start(), m.group(1), m.group(2), None, m.group(3)))
+    found.sort(key=lambda item: item[0])
+    matches = [item[0] for item in found]
     functions = {}
     strings_xref = {}
     data_refs = {}
 
-    for i, m in enumerate(matches):
-        if m.group(3):
-            address = int(m.group(3), 16)
+    for i, (start, ret_type, name, hexaddr, argstr) in enumerate(found):
+        if hexaddr:
+            address = int(hexaddr, 16)
         else:
-            address = name_map.get(m.group(2))
+            address = name_map.get(name)
             if address is None:
                 continue
         rva = address - base if address >= base else address
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[m.start():end]
+        end = matches[i + 1] if i + 1 < len(matches) else len(text)
+        body = text[start:end]
 
         strings = []
         for s in STR_RE.findall(body):
@@ -349,14 +352,14 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             else:
                 consts.add(value)
 
-        args = parse_args_list(m.group(4))
+        args = parse_args_list(argstr)
         key = f'0x{rva:x}'
         functions[key] = {
-            'name': m.group(2),
+            'name': name,
             'address': address,
             'offset': rva,
-            'return_type': m.group(1).strip(),
-            'signature': f"{m.group(1).strip()} ({', '.join(args)})" if args else f'{m.group(1).strip()} ()',
+            'return_type': ret_type.strip(),
+            'signature': f"{ret_type.strip()} ({', '.join(args)})" if args else f'{ret_type.strip()} ()',
             'args': len(args),
             'section': (lambda s: f"{s['seg']}.{s['sect']}" if s else None)(section_of(sections, address)),
             'size_bytes': None,

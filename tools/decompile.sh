@@ -32,9 +32,14 @@ NAMES=${NAMES_OUT:-names.r2}
 SIGS=${SIG_DB:-}
 
 "$R2" "${O[@]}" -q -c isj -c q "$BIN" > .isj 2>/dev/null || : > .isj
+python3 tools/binary.py --symbols "$BIN" > .syms.json 2>/dev/null || : > .syms.json
 python3 - "$IMPORTS" "$NAMES" "$SIGS" <<'PY'
 import json, re, sys
 rows = {}
+try:
+    rows.update({k: v for k, v in json.load(open('.syms.json')).items() if isinstance(v, int)})
+except Exception:
+    pass
 try:
     raw = open('.isj', errors='ignore').read()
     syms = json.loads(raw[raw.index('['):raw.rindex(']') + 1])
@@ -46,7 +51,7 @@ for s in syms:
     if name.startswith('sym.imp.') and addr:
         name = name[8:].lstrip('_')
         if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]*', name):
-            rows[name] = addr
+            rows.setdefault(name, addr)
 if sys.argv[3]:
     try:
         rows.update({k: v for k, v in json.load(open(sys.argv[3])).items() if isinstance(v, int)})
@@ -55,7 +60,8 @@ if sys.argv[3]:
 json.dump(rows, open(sys.argv[1], 'w'))
 with open(sys.argv[2], 'w') as f:
     for name, addr in rows.items():
-        f.write(f'af {name} @ {addr}; afn {name} @ {addr}\n')
+        if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,180}', name):
+            f.write(f'af {name} @ {addr}; afn {name} @ {addr}\n')
 print(f'symbols {len(rows)}')
 PY
 
