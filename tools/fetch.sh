@@ -30,6 +30,14 @@ fi
 echo "[+] $LOC"
 
 mkdir -p "$CACHE"
+if [ -s "$CACHE/binary" ]; then
+  CACHED=$(file_format "$CACHE/binary")
+  WANT=${EXPECT_FORMAT:-auto}
+  if [ "$WANT" != auto ] && [ "$CACHED" != "$WANT" ]; then
+    echo "[+] cached $CACHED, expected $WANT, refetch"
+    rm -f "$CACHE/binary"
+  fi
+fi
 if [ ! -s "$CACHE/binary" ]; then
   if ! curl -fL --retry 5 --retry-delay 5 --retry-all-errors --max-time 1800 -A "Mozilla/5.0" \
     -c "$CACHE/cookies.txt" -o "$CACHE/binary" "$LOC"; then
