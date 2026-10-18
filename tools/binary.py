@@ -60,7 +60,7 @@ def fat_slice(data):
     return fallback or (0, len(data))
 
 
-def macho_image(data):
+def _macho_image(data):
     start, size = fat_slice(data)
     end = len(data) if not size else min(len(data), start + size)
     if start + 32 > end:
@@ -304,6 +304,12 @@ def bind_names(data):
     slots.update(classic_slots(data, start))
     return resolve_stubs(data, sections, slots)
 
+
+
+def macho_image(data):
+    if len(data) >= 4 and data[:4] == ELF_MAGIC:
+        return elf_image(data)
+    return _macho_image(data)
 
 
 def is_elf(data):

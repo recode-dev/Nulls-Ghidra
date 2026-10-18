@@ -8,6 +8,8 @@ EM_AARCH64 = 183
 SHT_REL = 9
 SHT_RELA = 4
 SHF_EXECINSTR = 0x4
+ALIAS = {'.text': '__text', '.rodata': '__const', '.data.rel.ro': '__const',
+         '.data': '__data', '.bss': '__bss', '.got': '__got', '.data.rel.ro.local': '__const'}
 PT_LOAD = 1
 PF_X = 0x1
 
@@ -76,8 +78,10 @@ def elf_image(data):
         if not item['size']:
             continue
         exec_flag = bool(item['flags'] & SHF_EXECINSTR)
-        sections.append({'seg': '', 'sect': label, 'addr': item['addr'], 'size': item['size'],
-                         'fileoff': item['fileoff'], 'flags': item['flags'], 'exec': exec_flag,
+        mapped = ALIAS.get(label, label)
+        flags = item['flags'] | (0x80000000 if exec_flag else 0)
+        sections.append({'seg': '', 'sect': mapped, 'raw': label, 'addr': item['addr'], 'size': item['size'],
+                         'fileoff': item['fileoff'], 'flags': flags, 'exec': exec_flag,
                          'type': item['type'], 'link': item['link'], 'info': item['info'],
                          'entsize': item['entsize']})
         if exec_flag and item['addr']:
