@@ -134,18 +134,6 @@ jobs:
           echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
           test "${bodies:-0}" -gt 0
 
-      - if: always() && steps.cache-restore.outputs.cache-hit != 'true' && hashFiles('decompiled.c') != ''
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            decompiled.c
-            index_data/imports.json
-            index_data/symbols.json
-            index_data/funcs.json
-            structs.h
-          key: dump-${{ env.BIN_HASH }}-${{ env.SCRIPTS_HASH }}
-
       - if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
