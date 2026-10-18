@@ -600,8 +600,8 @@ def main():
     words.frombytes(blob[:len(blob) & ~3])
     if sys.byteorder != 'little':
         words.byteswap()
+    ret = 0xD65F03C0
     if arch == 'arm64':
-        ret = 0xD65F03C0
         for i in range(1, len(words)):
             word = words[i]
             framed = ((word & 0xFF8003FF) in (0xD10003FF, 0xD14003FF)
@@ -645,7 +645,12 @@ def main():
         if index <= 0 or index >= len(words) or address & 3:
             continue
         prev = words[index - 1]
-        if prev == ret or (prev & 0xFC000000) == 0x14000000:
+        if arch == 'arm32':
+            done = (prev & 0xFF00) == 0xBD00 or prev == 0x4770 or prev == 0xE12FFF1E \
+                or (prev & 0xFFFF8000) == 0xE8BD8000
+        else:
+            done = prev == ret or (prev & 0xFC000000) == 0x14000000
+        if done:
             thin_starts.add(address - base)
     thin_starts -= prologue_starts
     prologue_starts |= thin_starts
