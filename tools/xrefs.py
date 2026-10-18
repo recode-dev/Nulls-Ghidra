@@ -510,7 +510,7 @@ def main():
         raise BadImage('no executable __text section')
     image_size = len(raw) - start
     name_map = {}
-    names_path = args.names or ('imports.json' if os.path.exists('imports.json') else '')
+    names_path = args.names or ('index_data/imports.json' if os.path.exists('index_data/imports.json') else '')
     if names_path and os.path.exists(names_path):
         with open(names_path) as f:
             name_map = {k: v for k, v in json.load(f).items() if isinstance(v, int)}

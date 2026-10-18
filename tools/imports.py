@@ -19,7 +19,7 @@ DYLD_EXPORTS_TRIE = 0x80000033
 def parse_args():
     p = argparse.ArgumentParser(description='Dump imports, exports, dylibs and surviving symbols of a mach-o')
     p.add_argument('--bin', required=True, help='Mach-O binary')
-    p.add_argument('--out', default='symbols.json', help='rich JSON output')
+    p.add_argument('--out', default='index_data/symbols.json', help='rich JSON output')
     p.add_argument('--map', default='', help='flat {name: address} map for xrefs --names')
     p.add_argument('--names', default='', help='flat name table, one name and address per line')
     p.add_argument('--extra', default='', help='extra {name: address} json merged into the map')
@@ -173,6 +173,7 @@ def main():
         'symbols': {name: f'0x{a:x}' for name, a in sorted(defined.items())},
         'unbound': sorted(name for name in undefined if name not in imported),
     }
+    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False)
     if args.map:

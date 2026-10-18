@@ -8,15 +8,15 @@ JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 CODE=${CODE_OUT:-decompiled.c}
 ENG=${ENGINE_OUT:-engine.txt}
 LOG=${GHIDRA_LOG:-ghidra.log}
-FUNCS=${FUNCS_OUT:-funcs.json}
+FUNCS=${FUNCS_OUT:-index_data/funcs.json}
 NAMES=${NAMES_OUT:-names.tsv}
 THIN=${THIN_OUT:-binary.thin}
 GHIDRA_HOME=${GHIDRA_HOME:-$HOME/ghidra}
 HEADLESS=$GHIDRA_HOME/support/analyzeHeadless
 SCRIPTS=$(cd "$(dirname "$0")/.." && pwd)/ghidra
 PROJ=${PROJECT_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ghidra_ng_project}
-IMPORTS=${IMPORTS_OUT:-imports.json}
-SYMBOLS=${SYMBOLS_OUT:-symbols.json}
+IMPORTS=${IMPORTS_OUT:-index_data/imports.json}
+SYMBOLS=${SYMBOLS_OUT:-index_data/symbols.json}
 export MAXMEM=${MAXMEM:-8G}
 SHARD_MEM=${SHARD_MAXMEM:-3G}
 
@@ -25,6 +25,7 @@ SHARD_MEM=${SHARD_MAXMEM:-3G}
 [ -s "$BIN" ] || { echo "[-] missing $BIN"; exit 1; }
 [ -f "$SCRIPTS/Dump.java" ] || { echo "[-] missing $SCRIPTS/Dump.java"; exit 1; }
 
+mkdir -p index_data
 rm -f "$LOG"
 : > "$LOG"
 

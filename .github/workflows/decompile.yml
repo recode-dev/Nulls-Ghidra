@@ -76,10 +76,10 @@ jobs:
         with:
           path: |
             decompiled.c
-            imports.json
-            symbols.json
+            index_data/imports.json
+            index_data/symbols.json
+            index_data/funcs.json
             structs.h
-            funcs.json
           key: dump-${{ env.BIN_HASH }}
           restore-keys: |
             dump-
@@ -99,7 +99,7 @@ jobs:
           code=missing
           sym=missing
           if [ -s decompiled.c ]; then code=ready; fi
-          if [ -s imports.json ]; then sym=ready; fi
+          if [ -s index_data/imports.json ]; then sym=ready; fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "sym=$sym" >> "$GITHUB_OUTPUT"
           echo "cache dump=$code symbols=$sym"
@@ -134,7 +134,7 @@ jobs:
           python3 tools/xrefs.py \
             --bin "$BIN" \
             --code decompiled.c \
-            --names imports.json \
+            --names index_data/imports.json \
             --out index_data
 
       - run: |
@@ -207,10 +207,5 @@ jobs:
             index_data/
             decompiled.c
             binary
-            imports.json
-            symbols.json
-            engine.txt
-            funcs.json
-            ghidra.log
           retention-days: 30
           if-no-files-found: warn
