@@ -84,6 +84,7 @@ jobs:
         with:
           path: |
             decompiled.c
+            index_data/bin_hash.txt
             index_data/imports.json
             index_data/symbols.json
             index_data/funcs.json
@@ -91,7 +92,6 @@ jobs:
           key: dump-${{ env.BIN_HASH }}-${{ env.SCRIPTS_HASH }}
           restore-keys: |
             dump-${{ env.BIN_HASH }}-
-            dump-
 
       - uses: actions/setup-java@v4
         with:
@@ -107,8 +107,12 @@ jobs:
         run: |
           code=missing
           sym=missing
-          if [ -s decompiled.c ]; then code=ready; fi
-          if [ -s index_data/imports.json ]; then sym=ready; fi
+          if [ -s decompiled.c ] && [ -s index_data/bin_hash.txt ] && [ "$(cat index_data/bin_hash.txt)" = "$BIN_HASH" ]; then code=ready; fi
+          if [ "$code" != ready ] && [ -e decompiled.c ]; then
+            echo "cache image mismatch, dropping restored dump"
+            rm -f decompiled.c index_data/imports.json index_data/symbols.json index_data/funcs.json structs.h index_data/bin_hash.txt
+          fi
+          if [ "$code" = ready ] && [ -s index_data/imports.json ]; then sym=ready; fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "sym=$sym" >> "$GITHUB_OUTPUT"
           echo "cache dump=$code symbols=$sym"
@@ -133,6 +137,7 @@ jobs:
           bodies=$(grep -c '^{$' decompiled.c || true)
           echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
           test "${bodies:-0}" -gt 0
+          echo "$BIN_HASH" > index_data/bin_hash.txt
 
       - if: always()
         continue-on-error: true
@@ -141,6 +146,7 @@ jobs:
           name: dump-state
           path: |
             decompiled.c
+            index_data/bin_hash.txt
             index_data/imports.json
             index_data/symbols.json
             index_data/funcs.json
@@ -251,6 +257,7 @@ jobs:
         with:
           path: |
             decompiled.c
+            index_data/bin_hash.txt
             index_data/imports.json
             index_data/symbols.json
             index_data/funcs.json
