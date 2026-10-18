@@ -115,6 +115,7 @@ def make_stub(rva, address, section):
         'branches': 0,
         'switches': 0,
         'hash': '',
+        'line': 0,
         'strings': [],
         'calls': [],
         'call_sites': {},
@@ -334,6 +335,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             'branches': len(IF_RE.findall(body)) + len(CASE_RE.findall(body)) + len(GOTO_RE.findall(body)),
             'switches': len(SWITCH_RE.findall(body)),
             'hash': hashlib.md5(body.encode('utf-8', 'ignore')).hexdigest()[:16],
+            'line': text.count('\n', 0, start) + 2,
             'strings': strings,
             'calls': [f'0x{t:x}' for t in sorted(call_sites)],
             'call_sites': {f'0x{t:x}': n for t, n in sorted(call_sites.items())},
@@ -409,12 +411,14 @@ def load_json(path, default):
         return json.load(f)
 
 
-def format_row(entry, note=''):
+def format_row(entry, note='', code='decompiled.c'):
     size = entry.get('size_bytes')
     callers = len(entry.get('callers') or [])
     label = f'{size}B' if size else '?'
     tag = ' lsda' if entry.get('has_lsda') else ''
-    return f"0x{entry['offset']:x}  {entry['name']}  {label}  callers={callers}{tag}  {note}".rstrip()
+    line = entry.get('line') or 0
+    where = f'{code}:{line}' if line else code
+    return f"0x{entry['offset']:x}  {entry['name']}  {label}  callers={callers}{tag}  {where}  {note}".rstrip()
 
 
 def search(args):

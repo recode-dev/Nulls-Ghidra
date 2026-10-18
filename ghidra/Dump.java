@@ -1,5 +1,9 @@
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -10,21 +14,35 @@ import java.util.regex.Pattern;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
+import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
+import ghidra.program.model.symbol.SourceType;
 
 public class Dump extends GhidraScript {
 
     private static final Pattern THUNK = Pattern.compile("thunk_FUN_([0-9a-fA-F]+)");
     private static final Pattern PLAIN = Pattern.compile("FUN_([0-9a-fA-F]+)");
     private static final Pattern HEX = Pattern.compile("fcn\\.([0-9a-fA-F]+)");
+    private static final Pattern BAD = Pattern.compile("[^A-Za-z0-9_.:]");
 
     @Override
     public void run() throws Exception {
         String[] args = getScriptArgs();
-        String codePath = args.length > 0 && !args[0].isEmpty() ? args[0] : "decompiled.c";
-        String jsonPath = args.length > 1 && !args[1].isEmpty() ? args[1] : ".aflj";
-        boolean bodies = args.length < 3 || !"names".equals(args[2]);
+        String mode = args.length > 0 ? args[0] : "all";
+        String codePath = args.length > 1 && !args[1].isEmpty() ? args[1] : "decompiled.c";
+        String jsonPath = args.length > 2 && !args[2].isEmpty() ? args[2] : ".aflj";
+        String namesPath = args.length > 3 ? args[3] : "";
+
+        if ("pre".equals(mode)) {
+            tune();
+            return;
+        }
+
+        if (!namesPath.isEmpty() && new File(namesPath).isFile()) {
+            int renamed = applyNames(namesPath);
+            println("renamed " + renamed);
+        }
 
         List<Function> funcs = new ArrayList<>();
         FunctionIterator iterator = currentProgram.getFunctionManager().getFunctions(true);
@@ -34,7 +52,7 @@ public class Dump extends GhidraScript {
         writeFunctions(jsonPath, funcs);
         println("functions " + funcs.size());
 
-        if (!bodies) {
+        if ("names".equals(mode)) {
             return;
         }
 
@@ -66,6 +84,7 @@ public class Dump extends GhidraScript {
                         failed++;
                         continue;
                     }
+                    out.write(marker(func));
                     out.write(normalize(text));
                     out.write('\n');
                     done++;
@@ -77,6 +96,85 @@ public class Dump extends GhidraScript {
             dec.dispose();
         }
         println("bodies " + done + " failed " + failed);
+    }
+
+    private void tune() {
+        String[][] options = {
+            {"Decompiler Parameter ID", "true"},
+            {"Decompiler Switch Analysis", "true"},
+            {"Decompiler Stack Analysis", "true"},
+            {"Create Address Tables", "true"},
+        };
+        for (String[] pair : options) {
+            try {
+                setAnalysisOption(currentProgram, pair[0], pair[1]);
+            } catch (Exception error) {
+                println("option skipped " + pair[0]);
+            }
+        }
+    }
+
+    private int applyNames(String path) throws Exception {
+        int renamed = 0;
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("afn ")) {
+                    continue;
+                }
+                int at = line.indexOf(" @ ");
+                if (at < 0) {
+                    continue;
+                }
+                String name = sanitize(line.substring(4, at).trim());
+                if (name.isEmpty()) {
+                    continue;
+                }
+                long value;
+                try {
+                    value = address(line.substring(at + 3).trim());
+                } catch (NumberFormatException error) {
+                    continue;
+                }
+                Address target = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(value);
+                Function func = getFunctionAt(target);
+                if (func == null) {
+                    continue;
+                }
+                try {
+                    func.setName(name, SourceType.USER_DEFINED);
+                    renamed++;
+                } catch (Exception error) {
+                    continue;
+                }
+            }
+        }
+        return renamed;
+    }
+
+    private long address(String token) {
+        if (token.startsWith("0x") || token.startsWith("0X")) {
+            return Long.parseLong(token.substring(2), 16);
+        }
+        return Long.parseLong(token);
+    }
+
+    private String sanitize(String name) {
+        String clean = BAD.matcher(name).replaceAll("_");
+        if (clean.isEmpty()) {
+            return clean;
+        }
+        char first = clean.charAt(0);
+        if (Character.isDigit(first)) {
+            clean = "_" + clean;
+        }
+        return clean;
+    }
+
+    private String marker(Function func) {
+        return "// " + func.getName() + " 0x" + Long.toHexString(func.getEntryPoint().getOffset())
+                + " size 0x" + Long.toHexString(func.getBody().getNumAddresses()) + "\n";
     }
 
     private void writeFunctions(String path, List<Function> funcs) throws Exception {
