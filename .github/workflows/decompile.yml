@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: decompile-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   fetch:
@@ -71,8 +71,8 @@ jobs:
           BH=$(shasum -a 256 "$BIN" | awk '{print $1}')
           echo "BIN_HASH=$BH" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v4
-        id: decompile-cache
+      - uses: actions/cache/restore@v4
+        id: cache-restore
         with:
           path: |
             decompiled.c
@@ -124,6 +124,18 @@ jobs:
           bodies=$(grep -c '^{$' decompiled.c || true)
           echo "decompiled.c: $(wc -c < decompiled.c | tr -d ' ') bytes, ${bodies:-0} function bodies"
           test "${bodies:-0}" -gt 0
+
+      - if: always() && steps.cache-restore.outputs.cache-hit != 'true' && hashFiles('decompiled.c') != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            decompiled.c
+            index_data/imports.json
+            index_data/symbols.json
+            index_data/funcs.json
+            structs.h
+          key: dump-${{ env.BIN_HASH }}
 
       - run: |
           python3 tools/unwind.py \
@@ -190,7 +202,7 @@ jobs:
             echo "### Dump & Indexing Summary (${{ needs.fetch.outputs.ver }})"
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Cache Hit | ${{ steps.decompile-cache.outputs.cache-hit == 'true' }} |"
+            echo "| Cache | ${{ steps.cache-restore.outputs.cache-matched-key || 'none' }} |"
             echo "| Cached dump | ${{ steps.state.outputs.code }} |"
             echo "| decompiled.c | $(wc -c < decompiled.c 2>/dev/null | tr -d ' ' || echo 0) bytes |"
             echo "| Function bodies | $(grep -c '^{$' decompiled.c 2>/dev/null || echo 0) |"
