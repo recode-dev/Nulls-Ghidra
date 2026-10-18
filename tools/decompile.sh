@@ -10,7 +10,7 @@ LOG=${R2_LOG:-r2.log}
 RAW=${RAW_OUT:-r2.out}
 AFLJ=${AFLJ_OUT:-.aflj}
 R2=${R2BIN:-r2}
-STALL=${STALL:-300}
+STALL=${STALL:-900}
 
 O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=true -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
 
@@ -36,8 +36,9 @@ watch() {
     i=$((i + 60))
     bytes=$(wc -c < "$RAW" 2>/dev/null || echo 0)
     n=$(grep -c '^{$' "$RAW" 2>/dev/null || true)
-    last=$(tail -1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-100)
-    echo "dump ${i}s $((bytes / 1048576))MB ${n:-0} funcs ${last:+| $last}"
+    last=$(tail -1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-80)
+    marks=$(grep -c '@@AFLJ@@\|@@DUMP@@' "$RAW" 2>/dev/null || true)
+    echo "dump ${i}s $((bytes / 1048576))MB ${n:-0} funcs marks=${marks:-0} ${last:+| $last}"
     if [ "$bytes" -eq "$prev" ]; then
       idle=$((idle + 60))
     else
