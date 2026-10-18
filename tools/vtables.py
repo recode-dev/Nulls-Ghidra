@@ -5,7 +5,7 @@ import json
 import os
 import struct
 
-from binary import detect_base, macho_sections
+from binary import BadImage, file_offset, macho_image
 
 DATA_SECTIONS = ('__const', '__data', '__objc_const', '__objc_data',
                  '__mod_init_func', '__init_offsets')
@@ -42,9 +42,8 @@ def decode_slot(value, base, starts, code_range=None):
     return None
 
 
-def data_sections(data):
-    return [s for s in macho_sections(data)
-            if s['sect'] in DATA_SECTIONS and s['size'] and s['fileoff']]
+def data_sections(sections):
+    return [s for s in sections if s['sect'] in DATA_SECTIONS and s['size'] and s['fileoff']]
 
 
 def scan_section(data, section, base, starts, min_slots, code_range=None, max_gap=2, ranges=()):
@@ -57,6 +56,8 @@ def scan_section(data, section, base, starts, min_slots, code_range=None, max_ga
     pos = lo
     while pos + 8 <= hi:
         fileoff = section['fileoff'] + (pos - lo)
+        if fileoff + 8 > len(data):
+            break
         value = struct.unpack_from('<Q', data, fileoff)[0]
         rva = decode_slot(value, base, starts)
         loose = False
@@ -137,11 +138,12 @@ def mark_prefixes(vtables):
                 break
 
 
-def header_of(data, address, base, data_ranges, segments):
-    if address - base < 16:
+def header_of(data, address, data_ranges, segments):
+    offset = file_offset(segments, address)
+    if offset is None or offset < 16:
         return None
-    offset_to_top = struct.unpack_from('<i', data, address - base - 16)[0]
-    typeinfo = struct.unpack_from('<Q', data, address - base - 8)[0]
+    offset_to_top = struct.unpack_from('<i', data, offset - 16)[0]
+    typeinfo = struct.unpack_from('<Q', data, offset - 8)[0]
     info_ok = typeinfo == 0 or any(lo <= typeinfo < hi for lo, hi in data_ranges)
     if not (info_ok and -0x10000 < offset_to_top <= 0):
         return None
@@ -201,10 +203,8 @@ def main():
 
     with open(args.bin, 'rb') as f:
         data = f.read()
-    base = detect_base(args.bin)
-
-    segments = macho_sections(data)
-    sections = data_sections(data)
+    _start, _cputype, base, segments = macho_image(data)
+    sections = data_sections(segments)
     data_ranges = [(section['addr'], section['addr'] + section['size']) for section in segments]
     function_keys = {f'0x{v["offset"]:x}' for v in functions.values()}
     text = next((s for s in segments if s['sect'] == '__text'), None)
@@ -247,7 +247,7 @@ def main():
             shadow = [i for i, m in enumerate(methods) if f'0x{m:x}' not in function_keys]
             if shadow:
                 entry['shadow'] = shadow
-            header = header_of(data, address, base, data_ranges, segments)
+            header = header_of(data, address, data_ranges, segments)
             if header:
                 entry['header'] = header
             (inits if is_init else vtables)[address] = entry
@@ -283,4 +283,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (BadImage, struct.error, OSError, ValueError) as exc:
+        raise SystemExit(f'[-] {exc}')

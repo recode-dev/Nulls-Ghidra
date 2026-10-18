@@ -5,7 +5,7 @@ import json
 import os
 import struct
 
-from binary import macho_sections
+from binary import BadImage, macho_image
 
 SECOND_LEVEL_REGULAR = 2
 SECOND_LEVEL_COMPRESSED = 3
@@ -18,25 +18,33 @@ def parse_args():
     return p.parse_args()
 
 
-def section(data, name):
-    for entry in macho_sections(data):
+def section(sections, name):
+    for entry in sections:
         if entry['sect'] == name and entry['size']:
             return entry
     return None
 
 
 def parse_page(blob, base_offset, function_offset):
+    if base_offset + 12 > len(blob):
+        return []
     kind = struct.unpack_from('<I', blob, base_offset)[0]
     out = []
     if kind == SECOND_LEVEL_COMPRESSED:
         entry_off, entry_count, _enc_off, _enc_count = struct.unpack_from('<HHHH', blob, base_offset + 4)
         for i in range(entry_count):
-            value = struct.unpack_from('<I', blob, base_offset + entry_off + i * 4)[0]
+            position = base_offset + entry_off + i * 4
+            if position + 4 > len(blob):
+                break
+            value = struct.unpack_from('<I', blob, position)[0]
             out.append(function_offset + (value & 0xFFFFFF))
     elif kind == SECOND_LEVEL_REGULAR:
         entry_off, entry_count = struct.unpack_from('<HH', blob, base_offset + 4)
         for i in range(entry_count):
-            offset, _encoding = struct.unpack_from('<II', blob, base_offset + entry_off + i * 8)
+            position = base_offset + entry_off + i * 8
+            if position + 8 > len(blob):
+                break
+            offset, _encoding = struct.unpack_from('<II', blob, position)
             out.append(offset)
     return out
 
@@ -45,7 +53,8 @@ def main():
     args = parse_args()
     with open(args.bin, 'rb') as f:
         data = f.read()
-    info = section(data, '__unwind_info')
+    _start, _cputype, base, sections = macho_image(data)
+    info = section(sections, '__unwind_info')
     version = 0
     starts = set()
     lsda = set()
@@ -54,6 +63,8 @@ def main():
         version, _ce_off, _ce_count, _pa_off, _pa_count, index_off, index_count = \
             struct.unpack_from('<7I', blob, 0)
 
+        if index_off + index_count * 12 > len(blob):
+            raise BadImage('unwind index truncated')
         index = [struct.unpack_from('<3I', blob, index_off + i * 12) for i in range(index_count)]
         for i, (function_offset, page_off, lsda_off) in enumerate(index):
             limit = index[i + 1][0] if i + 1 < len(index) else info['size']
@@ -68,10 +79,9 @@ def main():
                 starts.add(address)
 
     extra = set()
-    text = section(data, '__text')
-    eh = section(data, '__eh_frame')
+    text = section(sections, '__text')
+    eh = section(sections, '__eh_frame')
     if eh and text:
-        base = text['addr'] - text['fileoff']
         table = data[eh['fileoff']:eh['fileoff'] + eh['size']]
         off = 0
         while off + 8 <= len(table):
@@ -102,4 +112,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (BadImage, struct.error, OSError, ValueError) as exc:
+        raise SystemExit(f'[-] {exc}')

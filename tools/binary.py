@@ -4,180 +4,168 @@ import struct
 
 MH_MAGIC_64 = 0xfeedfacf
 FAT_MAGICS = (0xcafebabe, 0xcafebabf)
+CPU_TYPE_ARM64 = 0x0100000c
 LC_SEGMENT_64 = 0x19
-
-
-def macho_base(data, offset=0):
-    if len(data) < offset + 32:
-        return None
-    magic = struct.unpack_from('<I', data, offset)[0]
-    if magic in FAT_MAGICS or struct.unpack_from('>I', data, offset)[0] in FAT_MAGICS:
-        n = struct.unpack_from('>I', data, offset + 4)[0]
-        best = None
-        for i in range(n):
-            arch_off = struct.unpack_from('>I', data, offset + 8 + i * 20 + 8)[0]
-            candidate = macho_base(data, arch_off)
-            if candidate is not None and (best is None or candidate < best):
-                best = candidate
-        return best
-    if magic != MH_MAGIC_64:
-        return None
-    ncmds = struct.unpack_from('<I', data, offset + 16)[0]
-    cur = offset + 32
-    base = None
-    for _ in range(ncmds):
-        if cur + 8 > len(data):
-            break
-        cmd, size = struct.unpack_from('<II', data, cur)
-        if cmd == LC_SEGMENT_64 and size >= 72 and cur + 68 <= len(data):
-            vmaddr, _vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', data, cur + 24)
-            initprot = struct.unpack_from('<i', data, cur + 64)[0]
-            if (initprot & 0x4) and filesize > 0:
-                value = vmaddr - fileoff
-                if base is None or value < base:
-                    base = value
-        if size <= 0:
-            break
-        cur += size
-    return base
-
-
-def detect_base(path):
-    try:
-        with open(path, 'rb') as f:
-            head = f.read(1 << 20)
-    except OSError:
-        return 0
-    base = macho_base(head)
-    return base if base else 0
-
-
-def macho_sections(data, offset=0):
-    if len(data) < offset + 32:
-        return []
-    magic = struct.unpack_from('<I', data, offset)[0]
-    if magic in FAT_MAGICS or struct.unpack_from('>I', data, offset)[0] in FAT_MAGICS:
-        n = struct.unpack_from('>I', data, offset + 4)[0]
-        for i in range(n):
-            arch_off = struct.unpack_from('>I', data, offset + 8 + i * 20 + 8)[0]
-            found = macho_sections(data, arch_off)
-            if found:
-                for entry in found:
-                    entry['fileoff'] += arch_off
-                return found
-        return []
-    if magic != MH_MAGIC_64:
-        return []
-    ncmds = struct.unpack_from('<I', data, offset + 16)[0]
-    cur = offset + 32
-    out = []
-    for _ in range(ncmds):
-        if cur + 8 > len(data):
-            break
-        cmd, size = struct.unpack_from('<II', data, cur)
-        if cmd == LC_SEGMENT_64 and size >= 72:
-            nsects = struct.unpack_from('<I', data, cur + 64)[0]
-            base = cur + 72
-            for i in range(nsects):
-                sect = base + i * 80
-                if sect + 80 > len(data):
-                    break
-                sectname = struct.unpack_from('<16s', data, sect)[0].rstrip(b'\0').decode('utf-8', 'replace')
-                segname = struct.unpack_from('<16s', data, sect + 16)[0].rstrip(b'\0').decode('utf-8', 'replace')
-                addr, sz, fileoff = struct.unpack_from('<QQI', data, sect + 32)
-                flags = struct.unpack_from('<I', data, sect + 64)[0]
-                out.append({'seg': segname, 'sect': sectname, 'addr': addr, 'size': sz,
-                            'fileoff': fileoff, 'flags': flags})
-        if size <= 0:
-            break
-        cur += size
-    return out
-
-
 CHAINED_FIXUPS = 0x80000034
+ZEROFILL = (0x1, 0xc, 0x12)
 CHAIN_FORMATS = {
-    1: (8, 11, 62, 0xFFFF),     
-    2: (4, 12, 63, 0xFFFFFF),   
-    6: (4, 12, 63, 0xFFFFFF),   
-    9: (8, 11, 62, 0xFFFF),     
-    12: (8, 12, 62, 0xFFFFFF),  
+    1: (8, 11, 62, 0xFFFF),
+    2: (4, 12, 63, 0xFFFFFF),
+    6: (4, 12, 63, 0xFFFFFF),
+    9: (8, 11, 62, 0xFFFF),
+    12: (8, 12, 62, 0xFFFFFF),
 }
 
 
-def slice_offset(data):
-    if len(data) < 8:
-        return 0
-    if struct.unpack_from('>I', data, 0)[0] in FAT_MAGICS:
-        n = struct.unpack_from('>I', data, 4)[0]
-        if n:
-            return struct.unpack_from('>I', data, 16)[0]
-    return 0
+class BadImage(Exception):
+    pass
 
 
-def bind_names(path):
-    """{stub address: import name} from LC_DYLD_CHAINED_FIXUPS, version independent."""
-    with open(path, 'rb') as f:
-        data = f.read()
-    base = slice_offset(data)
-    if len(data) < base + 32:
-        return {}
-    ncmds = struct.unpack_from('<I', data, base + 16)[0]
-    cur = base + 32
-    blob = None
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', data, cur)
-        if cmd == CHAINED_FIXUPS and size >= 16:
-            off, length = struct.unpack_from('<II', data, cur + 8)
-            blob = data[base + off:base + off + length]
-        if size <= 0:
+def unpack(fmt, data, offset, what='field'):
+    if offset < 0 or offset + struct.calcsize(fmt) > len(data):
+        raise BadImage(f'{what} out of bounds at 0x{offset:x}')
+    return struct.unpack_from(fmt, data, offset)
+
+
+def u16(data, offset, what='field'):
+    return unpack('<H', data, offset, what)[0]
+
+
+def u32(data, offset, what='field'):
+    return unpack('<I', data, offset, what)[0]
+
+
+def u64(data, offset, what='field'):
+    return unpack('<Q', data, offset, what)[0]
+
+
+def fat_slice(data):
+    if len(data) < 8 or struct.unpack_from('>I', data, 0)[0] not in FAT_MAGICS:
+        return 0, len(data)
+    count = struct.unpack_from('>I', data, 4)[0]
+    fallback = None
+    for index in range(count):
+        pos = 8 + index * 20
+        if pos + 20 > len(data):
             break
-        cur += size
-    if not blob or len(blob) < 28:
+        cputype, _subtype, offset, size = struct.unpack_from('>IIII', data, pos)
+        if fallback is None:
+            fallback = (offset, size)
+        if cputype == CPU_TYPE_ARM64:
+            return offset, size
+    return fallback or (0, len(data))
+
+
+def macho_image(data):
+    start, size = fat_slice(data)
+    end = len(data) if not size else min(len(data), start + size)
+    if start + 32 > end:
+        raise BadImage('truncated mach header')
+    magic = struct.unpack_from('<I', data, start)[0]
+    if magic != MH_MAGIC_64:
+        raise BadImage(f'unsupported mach magic 0x{magic:08x}')
+    cputype = struct.unpack_from('<i', data, start + 4)[0]
+    ncmds = u32(data, start + 16, 'mach header')
+    cur = start + 32
+    base = None
+    sections = []
+    for _ in range(ncmds):
+        cmd = u32(data, cur, 'load command')
+        cmdsize = u32(data, cur + 4, 'load command')
+        if cmdsize < 8 or cur + cmdsize > end:
+            raise BadImage(f'bad load command at 0x{cur:x}')
+        if cmd == LC_SEGMENT_64 and cmdsize >= 72:
+            vmaddr, _vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', data, cur + 24)
+            initprot = struct.unpack_from('<i', data, cur + 60)[0]
+            if initprot & 0x4 and filesize:
+                value = vmaddr - fileoff
+                if base is None or value < base:
+                    base = value
+            count = u32(data, cur + 64, 'segment')
+            for index in range(count):
+                sect = cur + 72 + index * 80
+                if sect + 80 > end:
+                    raise BadImage(f'truncated section at 0x{sect:x}')
+                sectname = data[sect:sect + 16].rstrip(b'\0').decode('utf-8', 'replace')
+                segname = data[sect + 16:sect + 32].rstrip(b'\0').decode('utf-8', 'replace')
+                addr, length, offset = struct.unpack_from('<QQI', data, sect + 32)
+                flags = struct.unpack_from('<I', data, sect + 64)[0]
+                if (flags & 0xFF) in ZEROFILL:
+                    continue
+                sections.append({'seg': segname, 'sect': sectname, 'addr': addr, 'size': length,
+                                 'fileoff': start + offset, 'flags': flags})
+        cur += cmdsize
+    return start, cputype, base or 0, sections
+
+
+def file_offset(sections, address):
+    for section in sections:
+        if section['addr'] <= address < section['addr'] + section['size']:
+            return section['fileoff'] + address - section['addr']
+    return None
+
+
+def chained_fixups(data, start):
+    cur = start + 32
+    for _ in range(u32(data, start + 16, 'mach header')):
+        cmd = u32(data, cur, 'load command')
+        cmdsize = u32(data, cur + 4, 'load command')
+        if cmd == CHAINED_FIXUPS and cmdsize >= 16:
+            return u32(data, cur + 8, 'chained fixups'), u32(data, cur + 12, 'chained fixups')
+        if cmdsize < 8:
+            break
+        cur += cmdsize
+    return 0, 0
+
+
+def bind_names(data):
+    start, _cputype, base, sections = macho_image(data)
+    offset, length = chained_fixups(data, start)
+    blob = data[start + offset:start + offset + length]
+    if len(blob) < 28:
         return {}
-    _ver, starts_off, imports_off, symbols_off, count, fmt, _sfmt = \
+    _version, starts_off, imports_off, symbols_off, count, fmt, _symbol_format = \
         struct.unpack_from('<7I', blob, 0)
     if fmt not in (1, 2, 3):
         return {}
+
     names = []
-    for i in range(count):
+    for index in range(count):
         if fmt == 3:
-            raw = struct.unpack_from('<Q', blob, imports_off + i * 8)[0]
-            name_off = (raw >> 32) & 0xFFFFFFFF
+            name_off = (u64(blob, imports_off + index * 8, 'imports') >> 32) & 0xFFFFFFFF
+        elif fmt == 2:
+            name_off = u32(blob, imports_off + index * 8, 'imports') >> 9
         else:
-            raw = struct.unpack_from('<I', blob, imports_off + i * (8 if fmt == 2 else 4))[0]
-            name_off = raw >> 9
-        end = blob.find(b'\0', symbols_off + name_off)
-        name = blob[symbols_off + name_off:end if end > 0 else None].decode('utf-8', 'replace')
+            name_off = u32(blob, imports_off + index * 4, 'imports') >> 9
+        begin = symbols_off + name_off
+        end = blob.find(b'\0', begin) if begin < len(blob) else -1
+        name = blob[begin:end].decode('utf-8', 'replace') if end > begin else ''
         names.append(name.lstrip('_'))
 
-    image_base = macho_base(data) or 0
-    sections = macho_sections(data)
-    def fileoff_of(vmaddr):
-        for s in sections:
-            if s['addr'] <= vmaddr < s['addr'] + s['size']:
-                return s['fileoff'] + vmaddr - s['addr']
-        return None
-
-    seg_count = struct.unpack_from('<I', blob, starts_off)[0]
+    segment_count = u32(blob, starts_off, 'image starts')
+    if starts_off + 4 + segment_count * 4 > len(blob):
+        raise BadImage('image starts truncated')
     slots = {}
-    for seg in range(seg_count):
-        info_off = struct.unpack_from('<I', blob, starts_off + 4 + seg * 4)[0]
+    for segment in range(segment_count):
+        info_off = u32(blob, starts_off + 4 + segment * 4, 'image starts')
         if not info_off:
             continue
-        p = starts_off + info_off
-        _size, page_size, pointer_format = struct.unpack_from('<IHH', blob, p)
-        seg_addr = struct.unpack_from('<Q', blob, p + 8)[0]
-        page_count = struct.unpack_from('<H', blob, p + 20)[0]
+        pos = starts_off + info_off
+        if pos + 22 > len(blob):
+            raise BadImage('segment starts truncated')
+        _size, page_size, pointer_format = struct.unpack_from('<IHH', blob, pos)
+        seg_addr = u64(blob, pos + 8, 'segment starts')
+        page_count = min(u16(blob, pos + 20, 'segment starts'), (len(blob) - pos - 22) // 2)
         if pointer_format not in CHAIN_FORMATS:
             continue
         stride, next_bits, bind_bit, ord_mask = CHAIN_FORMATS[pointer_format]
         for page in range(page_count):
-            start = struct.unpack_from('<H', blob, p + 22 + page * 2)[0]
-            if start == 0xFFFF or start & 0x8000:
+            begin = u16(blob, pos + 22 + page * 2, 'page starts')
+            if begin == 0xFFFF or begin & 0x8000:
                 continue
-            address = image_base + seg_addr + page * page_size + start
+            address = base + seg_addr + page * page_size + begin
             while True:
-                off = fileoff_of(address)
+                off = file_offset(sections, address)
                 if off is None or off + 8 > len(data):
                     break
                 pointer = struct.unpack_from('<Q', data, off)[0]
@@ -196,6 +184,8 @@ def bind_names(path):
             continue
         for pos in range(section['addr'], section['addr'] + section['size'] - 11, 12):
             off = section['fileoff'] + pos - section['addr']
+            if off < 0 or off + 8 > len(data):
+                break
             adrp, ldr = struct.unpack_from('<II', data, off)
             if (adrp & 0x9F000000) != 0x90000000 or (ldr & 0xFFC00000) != 0xF9400000:
                 continue
@@ -211,7 +201,15 @@ def bind_names(path):
 
 
 if __name__ == '__main__':
+    import json
     import sys
-    import json as _json
-    if len(sys.argv) == 3 and sys.argv[1] == '--symbols':
-        print(_json.dumps({name: addr for addr, name in bind_names(sys.argv[2]).items()}))
+
+    if len(sys.argv) != 3 or sys.argv[1] != '--symbols':
+        raise SystemExit('[-] usage: binary.py --symbols <macho>')
+    try:
+        with open(sys.argv[2], 'rb') as handle:
+            payload = handle.read()
+        table = bind_names(payload)
+    except (BadImage, struct.error, OSError) as exc:
+        raise SystemExit(f'[-] {exc}')
+    print(json.dumps({name: addr for addr, name in table.items()}))

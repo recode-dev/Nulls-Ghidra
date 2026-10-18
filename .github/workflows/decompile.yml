@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: direct archive or binary URL (any game)
+        description: Google Drive link to the game binary (raw Mach-O or IPA)
         default: ''
       seconds:
         description: total analysis budget in seconds
@@ -27,31 +27,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
-      ver: ${{ steps.g.outputs.VER || steps.r.outputs.VER }}
-      size: ${{ steps.g.outputs.BINSIZE }}
+      ver: ${{ steps.g.outputs.VER }}
       url_hash: ${{ steps.uh.outputs.URL_HASH }}
     steps:
       - uses: actions/checkout@v4
 
       - id: uh
         run: |
-          U="${{ inputs.url }}"
+          U="${{ inputs.url || vars.BINARY_URL }}"
           H=$(echo -n "$U" | shasum -a 256 | awk '{print $1}')
           echo "URL_HASH=$H" >> "$GITHUB_OUTPUT"
-
-      - id: r
-        env:
-          BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
-          RESOLVE_ONLY: '1'
-        run: bash tools/fetch.sh
 
       - uses: actions/cache@v4
         with:
           path: ipa_cache
-          key: ipa-${{ steps.r.outputs.VER }}-${{ steps.uh.outputs.URL_HASH }}
-          restore-keys: |
-            ipa-${{ steps.r.outputs.VER }}-
-            ipa-
+          key: ipa-${{ steps.uh.outputs.URL_HASH }}
+          restore-keys: ipa-
 
       - id: g
         env:
@@ -204,5 +195,6 @@ jobs:
             decompiled.c
             binary
             imports.json
+            engine.txt
           retention-days: 30
           if-no-files-found: warn

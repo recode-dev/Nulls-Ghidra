@@ -7,7 +7,7 @@ import json
 import os
 import struct
 
-from binary import detect_base, macho_sections
+from binary import BadImage, file_offset, macho_image
 
 PTR_MASKS = ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1)
 ADRP_MASK = 0x9F000000
@@ -80,8 +80,7 @@ def main():
 
     with open(args.bin, 'rb') as f:
         data = f.read()
-    base = detect_base(args.bin)
-    sections = macho_sections(data)
+    _start, _cputype, base, sections = macho_image(data)
     text = next((s for s in sections if s['sect'] == '__text'), None)
     if text is None:
         raise SystemExit('[-] no __text section')
@@ -107,7 +106,6 @@ def main():
         if offset is None:
             continue
         address = target + offset
-        
         for j in range(step + 1, min(step + args.window, len(words) - i - 1) + 1):
             extra = add_offset(words[i + j], reg)
             if extra is None:
@@ -148,8 +146,8 @@ def main():
     tables = 0
     for address, entry in refs.items():
         slots = 0
-        position = address - base
-        while slots < MAX_TABLE and 0 <= position + slots * 8 < len(data) - 8:
+        position = file_offset(sections, address)
+        while position is not None and slots < MAX_TABLE and position + slots * 8 + 8 <= len(data):
             value = struct.unpack_from('<Q', data, position + slots * 8)[0]
             if not decode_code_pointer(value, base, starts_set):
                 break
@@ -191,4 +189,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (BadImage, struct.error, OSError, ValueError) as exc:
+        raise SystemExit(f'[-] {exc}')

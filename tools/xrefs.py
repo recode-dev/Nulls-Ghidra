@@ -8,10 +8,9 @@ import json
 import os
 import re
 import struct
-import subprocess
 import sys
 
-from binary import FAT_MAGICS, MH_MAGIC_64, detect_base, macho_sections
+from binary import BadImage, CPU_TYPE_ARM64, macho_image
 
 FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
@@ -39,6 +38,7 @@ GOTO_RE = re.compile(r'\bgoto\b')
 SWITCH_RE = re.compile(r'\bswitch\s*\(')
 LOOP_RE = re.compile(r'\b(while|for|do)\b')
 CODE_MARKERS = (';', '{', '}', 'fcn.', 'Var', '\\n', '\\x')
+STRING_SECTIONS = ('__cstring', '__objc_methname', '__objc_classname', '__objc_methtype')
 
 
 def parse_args():
@@ -54,26 +54,24 @@ def parse_args():
     return p.parse_args()
 
 
-def bin_strings(path, min_len):
+def bin_strings(data, sections, min_len):
     out = {}
-    if not os.path.exists(path):
-        return out
-    try:
-        raw = subprocess.check_output(['strings', '-a', '-t', 'x', path],
-                                      stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
-    except (OSError, subprocess.CalledProcessError):
-        return out
-    for line in raw.splitlines():
-        parts = line.strip().split(maxsplit=1)
-        if len(parts) != 2 or len(parts[1]) < min_len:
+    for section in sections:
+        if section['sect'] not in STRING_SECTIONS or not section['size']:
             continue
-        try:
-            offset = int(parts[0], 16)
-        except ValueError:
-            continue
-        text = parts[1]
-        entry = out.setdefault(text, {'offset': offset, 'size': len(text), 'count': 0})
-        entry['count'] += 1
+        blob = data[section['fileoff']:section['fileoff'] + section['size']]
+        pos = 0
+        while pos < len(blob):
+            end = blob.find(b'\0', pos)
+            if end < 0:
+                break
+            if end - pos >= min_len:
+                text = blob[pos:end].decode('utf-8', 'replace')
+                if text.isprintable():
+                    entry = out.setdefault(text, {'address': section['addr'] + pos,
+                                                  'size': end - pos, 'count': 0})
+                    entry['count'] += 1
+            pos = end + 1
     return out
 
 
@@ -128,54 +126,24 @@ def make_stub(rva, address, section):
     }
 
 
-def arm64_text(data, offset=0):
-    """Return (blob, vmaddr) of __TEXT.__text for the arm64 slice, or None."""
-    if len(data) < offset + 32:
-        return None
-    magic = struct.unpack_from('<I', data, offset)[0]
-    be = struct.unpack_from('>I', data, offset)[0]
-    if magic in FAT_MAGICS or be in FAT_MAGICS:
-        n = struct.unpack_from('>I', data, offset + 4)[0]
-        for i in range(n):
-            arch_off = struct.unpack_from('>I', data, offset + 8 + i * 20 + 8)[0]
-            found = arm64_text(data, arch_off)
-            if found:
-                return found
-        return None
-    if magic != MH_MAGIC_64:
-        return None
-    cputype = struct.unpack_from('<i', data, offset + 4)[0]
-    if cputype != 0x0100000c:  
-        return None
-    for section in macho_sections(data, offset):
-        if section['sect'] == '__text' and section['size'] and (section['flags'] & 0x80000000):
+def arm64_text(data, sections):
+    for section in sections:
+        if section['sect'] == '__text' and section['size'] and section['flags'] & 0x80000000:
             return data[section['fileoff']:section['fileoff'] + section['size']], section['addr']
     return None
 
 
-def adrp_string_xrefs(bin_path, functions, strings):
-    """Resolve string references from arm64 code by decoding literal addresses.
-
-    r2ghidra renders most cstrings as a raw pointer constant (0x100xxxxxx), so
-    STR_RE alone misses them. Three access shapes are decoded and attributed to
-    the enclosing function:
-      ADRP+ADD            -> address of the literal itself
-      ADRP+LDR            -> pointer stored in a literal/objc slot
-      ADRP+LDR+LDR        -> CFString struct whose +0x10 field is the cstring
-    """
-    with open(bin_path, 'rb') as f:
-        data = f.read()
-    located = arm64_text(data)
-    if located is None:
-        return {}
+def adrp_string_xrefs(data, located, sections, functions, strings):
     blob, text_addr = located
     addr_to_string = {v['address']: k for k, v in strings.items() if v.get('address')}
-    segments = macho_sections(data)
-    for section in segments:
+    for section in sections:
         if section['sect'] != '__cfstring' or not section['size']:
             continue
         for struct_addr in range(section['addr'], section['addr'] + section['size'] - 31, 32):
-            text_ptr = struct.unpack_from('<Q', data, section['fileoff'] + struct_addr - section['addr'] + 16)[0]
+            position = section['fileoff'] + struct_addr - section['addr'] + 16
+            if position + 8 > len(data):
+                break
+            text_ptr = struct.unpack_from('<Q', data, position)[0]
             text_ = addr_to_string.get(text_ptr)
             if text_:
                 addr_to_string.setdefault(struct_addr, text_)
@@ -190,7 +158,7 @@ def adrp_string_xrefs(bin_path, functions, strings):
         return starts[i][1]
 
     def deref(address):
-        for section in segments:
+        for section in sections:
             if section['addr'] <= address < section['addr'] + section['size']:
                 off = section['fileoff'] + address - section['addr']
                 if 0 <= off <= len(data) - 8:
@@ -205,7 +173,7 @@ def adrp_string_xrefs(bin_path, functions, strings):
         ins = struct.unpack_from('<I', blob, off)[0]
         site = off
         off += 4
-        if (ins & 0x9F000000) != 0x90000000:  
+        if (ins & 0x9F000000) != 0x90000000:
             continue
         rd = ins & 0x1F
         immlo = (ins >> 29) & 0x3
@@ -218,13 +186,11 @@ def adrp_string_xrefs(bin_path, functions, strings):
         for q in range(off, min(off + 32, limit), 4):
             ins2 = struct.unpack_from('<I', blob, q)[0]
             if (ins2 & 0xFF000000) == 0x91000000 and ((ins2 >> 5) & 0x1F) == rd:
-                
                 lo12 = (ins2 >> 10) & 0xFFF
                 if (ins2 >> 22) & 0x1:
                     lo12 <<= 12
                 target = (page + lo12) & 0xFFFFFFFFFFFFFFFF
             elif (ins2 & 0xFFC00000) == 0xF9400000 and ((ins2 >> 5) & 0x1F) == rd:
-                
                 slot = page + ((ins2 >> 10) & 0xFFF) * 8
                 value = deref(slot)
                 if value and value in addr_to_string:
@@ -267,12 +233,6 @@ def parse_args_list(raw):
     return items
 
 
-def exec_sections(path):
-    with open(path, 'rb') as f:
-        data = f.read()
-    return [s for s in macho_sections(data) if s['size'] and s['flags'] & 0x80000000]
-
-
 def section_of(sections, address):
     for section in sections:
         if section['addr'] <= address < section['addr'] + section['size']:
@@ -289,7 +249,6 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
     found = [(m.start(), m.group(1), m.group(2), m.group(3), m.group(4))
              for m in FUNC_RE.finditer(text)]
     if name_map:
-        
         for m in GENERIC_FUNC_RE.finditer(text):
             if m.group(2) in name_map:
                 found.append((m.start(), m.group(1), m.group(2), None, m.group(3)))
@@ -390,8 +349,6 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
         for ref in sorted(refs):
             data_refs.setdefault(f'0x{ref:x}', []).append(key)
 
-    
-    
     prologue_starts = prologue_starts or set()
     starts = set(unwind_starts) | set(prologue_starts)
     known_offsets = {int(k, 16) for k in functions}
@@ -442,20 +399,19 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
     return functions, strings_xref, data_refs, edges
 
 
-def string_vmaddr(sections, fileoff):
-    for s in sections:
-        if s['fileoff'] <= fileoff < s['fileoff'] + s['size']:
-            return s['addr'] + (fileoff - s['fileoff'])
-    return None
-
-
 def main():
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    base = detect_base(args.bin)
-    image_size = os.path.getsize(args.bin)
-    sections = exec_sections(args.bin)
+    with open(args.bin, 'rb') as f:
+        raw = f.read()
+    start, cputype, base, sections = macho_image(raw)
+    if cputype != CPU_TYPE_ARM64:
+        raise BadImage(f'cputype 0x{cputype:x} is not arm64')
+    located = arm64_text(raw, sections)
+    if located is None:
+        raise BadImage('no executable __text section')
+    image_size = len(raw) - start
     name_map = {}
     names_path = args.names or ('imports.json' if os.path.exists('imports.json') else '')
     if names_path and os.path.exists(names_path):
@@ -466,53 +422,49 @@ def main():
     if os.path.exists(unwind_path):
         with open(unwind_path) as f:
             unwind_starts = {int(v, 16) for v in json.load(f).get('starts', [])}
-    with open(args.bin, 'rb') as f:
-        raw = f.read()
+    blob, text_addr = located
     prologue_starts = set()
     thin_starts = set()
-    located = arm64_text(raw)
-    if located:
-        blob, text_addr = located
-        words = array.array('I')
-        words.frombytes(blob[:len(blob) & ~3])
-        if sys.byteorder != 'little':
-            words.byteswap()
-        ret = 0xD65F03C0
-        for i in range(1, len(words)):
-            word = words[i]
-            framed = ((word & 0xFF8003FF) in (0xD10003FF, 0xD14003FF)
-                      or ((word & 0xFFC00000) == 0xA9800000 and ((word >> 5) & 0x1F) == 31))
-            if not framed and word != ret:
+    words = array.array('I')
+    words.frombytes(blob[:len(blob) & ~3])
+    if sys.byteorder != 'little':
+        words.byteswap()
+    ret = 0xD65F03C0
+    for i in range(1, len(words)):
+        word = words[i]
+        framed = ((word & 0xFF8003FF) in (0xD10003FF, 0xD14003FF)
+                  or ((word & 0xFFC00000) == 0xA9800000 and ((word >> 5) & 0x1F) == 31))
+        if not framed and word != ret:
+            continue
+        prev = words[i - 1]
+        boundary = prev == ret or prev == 0xD503245F or (prev & 0xFC000000) == 0x14000000
+        if not boundary and prev == 0xD503201F and i > 1:
+            earlier = words[i - 2]
+            boundary = earlier == ret or (earlier & 0xFC000000) == 0x14000000
+        if boundary:
+            (prologue_starts if framed else thin_starts).add(text_addr + i * 4 - base)
+    code_lo = text_addr
+    code_hi = text_addr + len(blob)
+    pointed = set()
+    for section in sections:
+        if section['sect'] == '__text' or not section['size'] or not section['fileoff']:
+            continue
+        begin = section['fileoff']
+        for off in range(begin, min(begin + section['size'], len(raw)) - 7, 8):
+            value = struct.unpack_from('<Q', raw, off)[0]
+            if not value:
                 continue
-            prev = words[i - 1]
-            boundary = prev == ret or prev == 0xD503245F or (prev & 0xFC000000) == 0x14000000
-            if not boundary and prev == 0xD503201F and i > 1:
-                earlier = words[i - 2]
-                boundary = earlier == ret or (earlier & 0xFC000000) == 0x14000000
-            if boundary:
-                (prologue_starts if framed else thin_starts).add(text_addr + i * 4 - base)
-        code_lo = text_addr
-        code_hi = text_addr + len(blob)
-        pointed = set()
-        for section in macho_sections(raw):
-            if section['sect'] == '__text' or not section['size'] or not section['fileoff']:
-                continue
-            start = section['fileoff']
-            for off in range(start, start + section['size'] - 7, 8):
-                value = struct.unpack_from('<Q', raw, off)[0]
-                if not value:
-                    continue
-                for mask in ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1):
-                    if code_lo <= (value & mask) < code_hi:
-                        pointed.add(value & mask)
-                        break
-        for address in pointed:
-            index = (address - text_addr) >> 2
-            if index <= 0 or index >= len(words) or address & 3:
-                continue
-            prev = words[index - 1]
-            if prev == ret or (prev & 0xFC000000) == 0x14000000:
-                thin_starts.add(address - base)
+            for mask in ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1):
+                if code_lo <= (value & mask) < code_hi:
+                    pointed.add(value & mask)
+                    break
+    for address in pointed:
+        index = (address - text_addr) >> 2
+        if index <= 0 or index >= len(words) or address & 3:
+            continue
+        prev = words[index - 1]
+        if prev == ret or (prev & 0xFC000000) == 0x14000000:
+            thin_starts.add(address - base)
     thin_starts -= prologue_starts
     prologue_starts |= thin_starts
 
@@ -525,13 +477,9 @@ def main():
         if entry:
             entry.pop('prologue', None)
             entry['thin'] = True
-    strings = bin_strings(args.bin, args.min_string)
-    all_sections = macho_sections(raw)
-    for entry in strings.values():
-        fileoff = entry.pop('offset')
-        entry['address'] = string_vmaddr(all_sections, fileoff) or base + fileoff
+    strings = bin_strings(raw, sections, args.min_string)
 
-    for text_, keys in adrp_string_xrefs(args.bin, functions, strings).items():
+    for text_, keys in adrp_string_xrefs(raw, located, sections, functions, strings).items():
         merged = set(strings_xref.get(text_, []))
         merged.update(keys)
         strings_xref[text_] = sorted(merged)
@@ -558,4 +506,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (BadImage, struct.error, OSError, ValueError) as exc:
+        raise SystemExit(f'[-] {exc}')

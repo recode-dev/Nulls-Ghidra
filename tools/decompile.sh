@@ -25,26 +25,20 @@ kill_at() {
   return $r
 }
 
-[ -s "$BIN" ] || { echo "missing $BIN"; exit 1; }
+[ -s "$BIN" ] || { echo "[-] missing $BIN"; exit 1; }
 
 IMPORTS=${IMPORTS_OUT:-imports.json}
 NAMES=${NAMES_OUT:-names.r2}
 SIGS=${SIG_DB:-}
 
-"$R2" "${O[@]}" -q -c isj -c q "$BIN" > .isj 2>/dev/null || : > .isj
-python3 tools/binary.py --symbols "$BIN" > .syms.json 2>/dev/null || : > .syms.json
-python3 - "$IMPORTS" "$NAMES" "$SIGS" <<'PY'
+"$R2" "${O[@]}" -q -c isj -c q "$BIN" > .isj 2>> "$LOG" || { echo "[-] isj export failed"; exit 1; }
+python3 tools/binary.py --symbols "$BIN" > .syms.json 2>> "$LOG" || { echo "[-] chained fixups export failed"; exit 1; }
+python3 - "$IMPORTS" "$NAMES" "$SIGS" <<'PY' || { echo "[-] symbol table build failed"; exit 1; }
 import json, re, sys
-rows = {}
-try:
-    rows.update({k: v for k, v in json.load(open('.syms.json')).items() if isinstance(v, int)})
-except Exception:
-    pass
-try:
-    raw = open('.isj', errors='ignore').read()
-    syms = json.loads(raw[raw.index('['):raw.rindex(']') + 1])
-except Exception:
-    syms = []
+
+rows = {k: v for k, v in json.load(open('.syms.json')).items() if isinstance(v, int)}
+raw = open('.isj', errors='ignore').read()
+syms = json.loads(raw[raw.index('['):raw.rindex(']') + 1])
 for s in syms:
     name = s.get('name') or ''
     addr = s.get('vaddr') or 0
@@ -53,10 +47,7 @@ for s in syms:
         if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]*', name):
             rows.setdefault(name, addr)
 if sys.argv[3]:
-    try:
-        rows.update({k: v for k, v in json.load(open(sys.argv[3])).items() if isinstance(v, int)})
-    except Exception as exc:
-        print(f'sig db skipped: {exc}')
+    rows.update({k: v for k, v in json.load(open(sys.argv[3])).items() if isinstance(v, int)})
 json.dump(rows, open(sys.argv[1], 'w'))
 with open(sys.argv[2], 'w') as f:
     for name, addr in rows.items():
@@ -84,6 +75,7 @@ if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
     echo "analyze ${AE}s"
     if [ ! -f "$PROJ" ]; then
       tail -20 analyze.log 2>/dev/null
+      echo "[-] project save failed"
       exit 1
     fi
   fi
@@ -106,7 +98,6 @@ watch() {
 
 dump() {
   local b=$1 c=$2 out=$3
-  if [ "${R2_GHIDRA:-1}" = 0 ] && [ "$c" = 'pdg @@f' ]; then return 1; fi
   echo "dump start $c budget ${b}s"
   watch "$b" "$out" &
   local w=$!
@@ -125,23 +116,61 @@ S=$(date +%s)
 dump "$MAIN" 'pdg @@f' "$CODE"
 RP=$?
 NB=$(grep -c '^{$' "$CODE" 2>/dev/null || true)
-ENV_ENG=pdg
+ENGINE=pdg
 RC=none
 if [ "${NB:-0}" -lt 5 ]; then
-  ENV_ENG=pdc
+  ENGINE=pdc
   echo "pdg empty -> pdc"
   dump "$FALL" 'pdc @@f' "$CODE"
   RC=$?
 fi
 EL=$(( $(date +%s) - S ))
 
+TRIM=$(python3 - "$CODE" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding='utf-8', errors='ignore').read()
+start = text.rfind('\n{\n')
+if start < 0:
+    print(0)
+    raise SystemExit
+depth = 0
+index = start + 1
+quote = ''
+while index < len(text):
+    char = text[index]
+    if quote:
+        if char == '\\':
+            index += 2
+            continue
+        if char == quote:
+            quote = ''
+    elif char in '"\'':
+        quote = char
+    elif char == '{':
+        depth += 1
+    elif char == '}':
+        depth -= 1
+    index += 1
+if depth > 0:
+    gap = text.rfind('\n\n', 0, start)
+    header = text[gap + 2:start].strip() if gap >= 0 else ''
+    cut = gap + 1 if header and '\n' not in header else start
+    open(path, 'w', encoding='utf-8').write(text[:cut])
+    print(1)
+else:
+    print(0)
+PY
+) || { echo "[-] decompiled.c is not readable"; exit 1; }
+
 {
-  echo "engine=$ENV_ENG"
+  echo "engine=$ENGINE"
   echo "pdg_rc=$RP"
   echo "pdc_rc=$RC"
   echo "pdg_bodies=${NB:-0}"
+  echo "truncated=$TRIM"
   echo "r2=${R2V:-?}"
-  echo "plugin=${R2_GHIDRA:-?}"
   echo "budget=$BUDGET"
   echo "analyze_s=$AE"
   echo "pdg_budget_s=$MAIN"

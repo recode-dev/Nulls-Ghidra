@@ -45,11 +45,9 @@ if [ "$G" = 0 ]; then
     G=1
   fi
 fi
+[ "$G" = 1 ] || { echo "[-] r2ghidra plugin install failed"; exit 1; }
 
 echo "r2 $V plugin $G"
 if [ -n "${GITHUB_ENV:-}" ]; then
-  {
-    echo "R2V=$V"
-    echo "R2_GHIDRA=$G"
-  } >> "$GITHUB_ENV"
+  echo "R2V=$V" >> "$GITHUB_ENV"
 fi
