@@ -53,6 +53,9 @@ jobs:
   dump:
     needs: fetch
     runs-on: ubuntu-latest
+    outputs:
+      bin_hash: ${{ steps.env.outputs.bin_hash }}
+      scripts_hash: ${{ steps.env.outputs.scripts_hash }}
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +65,8 @@ jobs:
           name: bin
           path: bin
 
-      - run: |
+      - id: env
+        run: |
           set -euo pipefail
           BIN=$(find bin -type f | head -1)
           test -s "$BIN"
@@ -70,6 +74,10 @@ jobs:
           echo "BIN=$BIN" >> "$GITHUB_ENV"
           BH=$(shasum -a 256 "$BIN" | awk '{print $1}')
           echo "BIN_HASH=$BH" >> "$GITHUB_ENV"
+          echo "bin_hash=$BH" >> "$GITHUB_OUTPUT"
+          SH=$(find tools ghidra -type f \( -name '*.py' -o -name '*.sh' -o -name '*.java' \) -print0 | sort -z | xargs -0 cat | shasum -a 256 | awk '{print $1}')
+          echo "SCRIPTS_HASH=$SH" >> "$GITHUB_ENV"
+          echo "scripts_hash=$SH" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache/restore@v4
         id: cache-restore
@@ -80,8 +88,9 @@ jobs:
             index_data/symbols.json
             index_data/funcs.json
             structs.h
-          key: dump-${{ env.BIN_HASH }}
+          key: dump-${{ env.BIN_HASH }}-${{ env.SCRIPTS_HASH }}
           restore-keys: |
+            dump-${{ env.BIN_HASH }}-
             dump-
 
       - uses: actions/setup-java@v4
@@ -135,7 +144,21 @@ jobs:
             index_data/symbols.json
             index_data/funcs.json
             structs.h
-          key: dump-${{ env.BIN_HASH }}
+          key: dump-${{ env.BIN_HASH }}-${{ env.SCRIPTS_HASH }}
+
+      - if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: dump-state
+          path: |
+            decompiled.c
+            index_data/imports.json
+            index_data/symbols.json
+            index_data/funcs.json
+            structs.h
+          retention-days: 3
+          if-no-files-found: ignore
 
       - run: |
           python3 tools/unwind.py \
@@ -221,3 +244,27 @@ jobs:
             binary
           retention-days: 30
           if-no-files-found: warn
+
+  persist:
+    needs: [fetch, dump]
+    if: always() && needs.dump.outputs.bin_hash != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: dump-state
+          path: .
+
+      - if: hashFiles('decompiled.c') != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            decompiled.c
+            index_data/imports.json
+            index_data/symbols.json
+            index_data/funcs.json
+            structs.h
+          key: dump-${{ needs.dump.outputs.bin_hash }}-${{ needs.dump.outputs.scripts_hash }}
