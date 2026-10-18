@@ -9,6 +9,9 @@ on:
       seconds:
         description: total analysis budget in seconds
         default: '18000'
+      format:
+        description: 'expected binary format: auto, macho, elf32, elf64'
+        default: auto
 
 permissions:
   contents: read
@@ -37,11 +40,11 @@ jobs:
         with:
           path: bin_cache
           key: bin-${{ steps.uh.outputs.URL_HASH }}
-          restore-keys: bin-
 
       - id: g
         env:
           BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
+          EXPECT_FORMAT: ${{ inputs.format || 'auto' }}
         run: bash tools/fetch.sh
 
       - uses: actions/upload-artifact@v4

@@ -11,13 +11,15 @@ is_html() {
   head -c 1024 "$1" | grep -qi '<!doctype html\|<html'
 }
 
-is_macho() {
+file_format() {
   local magic
-  magic=$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')
+  magic=$(head -c 8 "$1" | od -An -tx1 | tr -d ' \n')
   case "$magic" in
-    cffaedfe|cefaedfe|cafebabe|bebafeca) return 0 ;;
+    cffaedfe*|cefaedfe*|cafebabe*|bebafeca*) echo macho ;;
+    7f454c460101*) echo elf32 ;;
+    7f454c460201*) echo elf64 ;;
+    *) echo unknown ;;
   esac
-  return 1
 }
 
 DRIVE_ID=$(printf '%s' "$URL" | sed -nE 's#.*drive\.google\.com/(file/d/|open\?id=|uc\?[^ ]*id=)([^/?&]+).*#\2#p')
@@ -59,11 +61,19 @@ if is_html "$CACHE/binary"; then
   echo "[-] drive returned an html page: $LOC"
   exit 1
 fi
-if ! is_macho "$CACHE/binary"; then
+FORMAT=$(file_format "$CACHE/binary")
+EXPECT=${EXPECT_FORMAT:-auto}
+if [ "$FORMAT" = unknown ]; then
   rm -f "$CACHE/binary"
-  echo "[-] not a mach-o: $(head -c 4 "$CACHE/binary" | od -An -tx1 | tr -d ' \n')"
+  echo "[-] unknown format: $(head -c 8 "$CACHE/binary" | od -An -tx1 | tr -d ' \n')"
   exit 1
 fi
+if [ "$EXPECT" != auto ] && [ "$FORMAT" != "$EXPECT" ]; then
+  rm -f "$CACHE/binary"
+  echo "[-] expected $EXPECT, got $FORMAT"
+  exit 1
+fi
+echo "[+] format $FORMAT"
 
 cp -f "$CACHE/binary" "$OUT"
 SIZE=$(wc -c < "$OUT" | tr -d ' ')
@@ -71,4 +81,5 @@ VER=$(shasum -a 256 "$OUT" | cut -c1-12)
 echo "[+] $OUT $SIZE bytes ver $VER"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "VER=$VER" >> "$GITHUB_OUTPUT"
+  echo "FORMAT=$FORMAT" >> "$GITHUB_OUTPUT"
 fi
