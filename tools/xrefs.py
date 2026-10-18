@@ -413,7 +413,8 @@ def format_row(entry, note=''):
     size = entry.get('size_bytes')
     callers = len(entry.get('callers') or [])
     label = f'{size}B' if size else '?'
-    return f"0x{entry['offset']:x}  {entry['name']}  {label}  callers={callers}  {note}".rstrip()
+    tag = ' lsda' if entry.get('has_lsda') else ''
+    return f"0x{entry['offset']:x}  {entry['name']}  {label}  callers={callers}{tag}  {note}".rstrip()
 
 
 def search(args):
@@ -511,9 +512,12 @@ def main():
             name_map = {k: v for k, v in json.load(f).items() if isinstance(v, int)}
     unwind_path = args.unwind or os.path.join(args.out, 'unwind.json')
     unwind_starts = set()
+    lsda_starts = set()
     if os.path.exists(unwind_path):
         with open(unwind_path) as f:
-            unwind_starts = {int(v, 16) for v in json.load(f).get('starts', [])}
+            unwound = json.load(f)
+        unwind_starts = {int(v, 16) for v in unwound.get('starts', [])}
+        lsda_starts = {int(v, 16) for v in unwound.get('lsda', [])}
     blob, text_addr = located
     prologue_starts = set()
     thin_starts = set()
@@ -569,6 +573,9 @@ def main():
         if entry:
             entry.pop('prologue', None)
             entry['thin'] = True
+    for entry in functions.values():
+        if entry['offset'] in lsda_starts:
+            entry['has_lsda'] = True
     strings = bin_strings(raw, sections, args.min_string)
 
     for text_, keys in adrp_string_xrefs(raw, located, sections, functions, strings).items():

@@ -7,6 +7,7 @@ FAT_MAGICS = (0xcafebabe, 0xcafebabf)
 CPU_TYPE_ARM64 = 0x0100000c
 LC_SEGMENT_64 = 0x19
 CHAINED_FIXUPS = 0x80000034
+DYLD_INFO_ONLY = 0x80000022
 ZEROFILL = (0x1, 0xc, 0x12)
 CHAIN_FORMATS = {
     1: (8, 11, 62, 0xFFFF),
@@ -105,23 +106,113 @@ def file_offset(sections, address):
     return None
 
 
-def chained_fixups(data, start):
+def load_commands(data, start):
     cur = start + 32
     for _ in range(u32(data, start + 16, 'mach header')):
         cmd = u32(data, cur, 'load command')
         cmdsize = u32(data, cur + 4, 'load command')
-        if cmd == CHAINED_FIXUPS and cmdsize >= 16:
-            return u32(data, cur + 8, 'chained fixups'), u32(data, cur + 12, 'chained fixups')
         if cmdsize < 8:
-            break
+            return
+        yield cmd, cur, cmdsize
         cur += cmdsize
-    return 0, 0
 
 
-def bind_names(data):
-    start, _cputype, base, sections = macho_image(data)
-    offset, length = chained_fixups(data, start)
-    blob = data[start + offset:start + offset + length]
+def segment_bases(data, start):
+    bases = []
+    for cmd, cur, size in load_commands(data, start):
+        if cmd == LC_SEGMENT_64 and size >= 72:
+            bases.append(struct.unpack_from('<Q', data, cur + 24)[0])
+    return bases
+
+
+def uleb(data, offset):
+    result = 0
+    shift = 0
+    while True:
+        if offset >= len(data):
+            raise BadImage('uleb128 out of bounds')
+        byte = data[offset]
+        offset += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, offset
+        shift += 7
+        if shift > 63:
+            raise BadImage('uleb128 too long')
+
+
+def walk_binds(blob, bases, slots):
+    pos = 0
+    name = ''
+    address = 0
+    while pos < len(blob):
+        byte = blob[pos]
+        pos += 1
+        opcode = byte & 0xF0
+        imm = byte & 0x0F
+        if opcode == 0x00:
+            return
+        if opcode in (0x10, 0x30, 0x50):
+            continue
+        if opcode in (0x20, 0x60):
+            _, pos = uleb(blob, pos)
+        elif opcode == 0x40:
+            end = blob.find(b'\0', pos)
+            if end < 0:
+                return
+            name = blob[pos:end].decode('utf-8', 'replace').lstrip('_')
+            pos = end + 1
+        elif opcode == 0x70:
+            seg_offset, pos = uleb(blob, pos)
+            if imm >= len(bases):
+                return
+            address = bases[imm] + seg_offset
+        elif opcode == 0x80:
+            delta, pos = uleb(blob, pos)
+            address += delta
+        elif opcode == 0x90:
+            slots[address] = name
+        elif opcode == 0xA0:
+            slots[address] = name
+            delta, pos = uleb(blob, pos)
+            address += delta
+        elif opcode == 0xB0:
+            slots[address] = name
+            address += imm * 8
+        elif opcode == 0xC0:
+            count, pos = uleb(blob, pos)
+            skip, pos = uleb(blob, pos)
+            for _ in range(count):
+                slots[address] = name
+                address += skip
+        else:
+            return
+
+
+def classic_slots(data, start):
+    slots = {}
+    bases = None
+    for cmd, cur, size in load_commands(data, start):
+        if cmd != DYLD_INFO_ONLY or size < 48:
+            continue
+        for field in (16, 24, 32):
+            offset = u32(data, cur + field, 'dyld info')
+            length = u32(data, cur + field + 4, 'dyld info')
+            if not length:
+                continue
+            if bases is None:
+                bases = segment_bases(data, start)
+            walk_binds(data[start + offset:start + offset + length], bases, slots)
+    return slots
+
+
+def chained_slots(data, start, base, sections):
+    blob = b''
+    for cmd, cur, size in load_commands(data, start):
+        if cmd == CHAINED_FIXUPS and size >= 16:
+            offset = u32(data, cur + 8, 'chained fixups')
+            length = u32(data, cur + 12, 'chained fixups')
+            blob = data[start + offset:start + offset + length]
     if len(blob) < 28:
         return {}
     _version, starts_off, imports_off, symbols_off, count, fmt, _symbol_format = \
@@ -177,7 +268,10 @@ def bind_names(data):
                 if not step:
                     break
                 address += step * stride
+    return slots
 
+
+def resolve_stubs(data, sections, slots):
     stubs = {}
     for section in sections:
         if section['sect'] not in ('__stubs', '__auth_stubs') or not section['size']:
@@ -198,6 +292,13 @@ def bind_names(data):
             if slot in slots:
                 stubs[pos] = slots[slot]
     return stubs
+
+
+def bind_names(data):
+    start, _cputype, base, sections = macho_image(data)
+    slots = chained_slots(data, start, base, sections)
+    slots.update(classic_slots(data, start))
+    return resolve_stubs(data, sections, slots)
 
 
 if __name__ == '__main__':

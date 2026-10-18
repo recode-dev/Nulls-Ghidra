@@ -41,7 +41,8 @@ def field_layout(fields, methods, max_offset):
             'reads': entry.get('reads', 0),
             'writes': entry.get('writes', 0),
             'types': entry.get('types') or {},
-            'methods': len(shared),
+            'funcs': sorted(shared),
+            'writers': sorted(shared & set(entry.get('writers') or [])),
         }
     return [layout[key] for key in sorted(layout)]
 
@@ -116,7 +117,9 @@ def main():
         print(f'[+] field {needle} -> {len(rows)} classes')
         for name, entry, field in sorted(rows):
             print(f'{name}  vtable={entry["vtable"]}  reads={field["reads"]} writes={field["writes"]} '
-                  f'width={field["width"]} methods={field["methods"]}')
+                  f'width={field["width"]}')
+            print(f'  funcs {" ".join(field["funcs"])}')
+            print(f'  writers {" ".join(field["writers"]) or "-"}')
 
     with_fields = sum(1 for entry in classes.values() if entry['fields'])
     with_ctors = sum(1 for entry in classes.values() if entry.get('constructors'))

@@ -118,12 +118,53 @@ RP=$?
 NB=$(grep -c '^{$' "$CODE" 2>/dev/null || true)
 ENGINE=pdg
 RC=none
+MERGED=0
 if [ "${NB:-0}" -lt 5 ]; then
-  ENGINE=pdc
-  echo "pdg empty -> pdc"
-  dump "$FALL" 'pdc @@f' "$CODE"
+  echo "pdg sparse -> pdc for the missing functions"
+  dump "$FALL" 'pdc @@f' "$CODE.pdc"
   RC=$?
+  COUNTS=$(python3 - "$CODE" "$CODE.pdc" <<'PY'
+import re, sys
+
+block = re.compile(r'(?m)^(?=[^\n]*\bfcn\.[0-9a-f]+\s*\()')
+name = re.compile(r'fcn\.([0-9a-f]+)')
+
+
+def blocks(path):
+    text = open(path, encoding='utf-8', errors='ignore').read()
+    starts = [match.start() for match in block.finditer(text)]
+    rows = []
+    for index, begin in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        body = text[begin:end]
+        found = name.search(body)
+        rows.append((found.group(1) if found else '', body))
+    return rows
+
+
+primary = blocks(sys.argv[1])
+extra = blocks(sys.argv[2])
+known = {key for key, _body in primary if key}
+merged = list(primary)
+added = 0
+for key, body in extra:
+    if key and key in known:
+        continue
+    merged.append((key, body))
+    added += 1
+with open(sys.argv[1], 'w', encoding='utf-8') as handle:
+    for _key, body in merged:
+        handle.write(body if body.endswith('\n') else body + '\n')
+print(len(primary), len(extra), added)
+PY
+) || { echo "[-] pdc merge failed"; exit 1; }
+  read -r KEPT DUMPED ADDED <<< "$COUNTS"
+  MERGED=$ADDED
+  rm -f "$CODE.pdc"
+  echo "merge kept ${KEPT} pdg bodies, added ${ADDED} of ${DUMPED} pdc bodies"
+  ENGINE=pdg+pdc
 fi
+
 EL=$(( $(date +%s) - S ))
 
 TRIM=$(python3 - "$CODE" <<'PY'
@@ -170,6 +211,7 @@ PY
   echo "pdc_rc=$RC"
   echo "pdg_bodies=${NB:-0}"
   echo "truncated=$TRIM"
+  echo "pdc_merged=$MERGED"
   echo "r2=${R2V:-?}"
   echo "budget=$BUDGET"
   echo "analyze_s=$AE"

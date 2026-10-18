@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: Google Drive link to the game binary (raw Mach-O or IPA)
+        description: Google Drive link to the game binary
         default: ''
       seconds:
         description: total analysis budget in seconds
@@ -40,9 +40,9 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ipa_cache
-          key: ipa-${{ steps.uh.outputs.URL_HASH }}
-          restore-keys: ipa-
+          path: bin_cache
+          key: bin-${{ steps.uh.outputs.URL_HASH }}
+          restore-keys: bin-
 
       - id: g
         env:
