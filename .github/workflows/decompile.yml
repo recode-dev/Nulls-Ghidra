@@ -83,7 +83,6 @@ jobs:
             r2proj
             decompiled.c
             imports.json
-            names.r2
             symbols.json
             .aflj
           key: decompile-${{ env.BIN_HASH }}-${{ needs.fetch.outputs.url_hash }}
@@ -209,5 +208,7 @@ jobs:
             imports.json
             symbols.json
             engine.txt
+            r2.log
+            analyze.log
           retention-days: 30
           if-no-files-found: warn

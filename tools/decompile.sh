@@ -9,6 +9,7 @@ CODE=${CODE_OUT:-decompiled.c}
 ENG=${ENGINE_OUT:-engine.txt}
 LOG=${R2_LOG:-r2.log}
 R2=${R2BIN:-r2}
+STALL=${STALL:-600}
 
 O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=true -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
 
@@ -17,21 +18,21 @@ kill_at() {
   shift
   "$@" &
   local p=$!
+  echo "$p" > .r2pid
   ( sleep "$b"; kill -INT "$p" 2>/dev/null; sleep 20; kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 &
   local w=$!
-  wait "$p"
+  wait "$p" 2>/dev/null
   local r=$?
   kill "$w" 2>/dev/null
+  rm -f .r2pid
   return $r
 }
 
 [ -s "$BIN" ] || { echo "[-] missing $BIN"; exit 1; }
 
 IMPORTS=${IMPORTS_OUT:-imports.json}
-NAMES=${NAMES_OUT:-names.r2}
 SYMBOLS=${SYMBOLS_OUT:-symbols.json}
 
-NI=()
 AE=0
 if [ -f .ae ]; then AE=$(cat .ae); fi
 
@@ -41,7 +42,7 @@ if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
   else
     AM=$((BUDGET / 3))
     S=$(date +%s)
-    kill_at "$AM" "$R2" "${O[@]}" "${NI[@]}" -q -c aaa \
+    kill_at "$AM" "$R2" "${O[@]}" -q -c aaa \
       -c "Ps $PWD/$PROJ" "$BIN" > analyze.log 2>&1
     AE=$(( $(date +%s) - S ))
     echo "$AE" > .ae
@@ -57,37 +58,54 @@ fi
 
 AFLJ=""
 if [ -s "$PROJ" ] && command -v "$R2" >/dev/null 2>&1; then
-  "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c aflj -c q "$BIN" > .aflj 2>> "$LOG" || true
+  kill_at "${AFLJ_BUDGET:-300}" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c aflj -c q "$BIN" > .aflj 2>> "$LOG" || true
   [ -s .aflj ] && AFLJ=.aflj
 fi
 
-python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --r2 "$NAMES" --aflj "$AFLJ" 2>> "$LOG" \
+python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --aflj "$AFLJ" 2>> "$LOG" \
   || { echo "[-] symbol export failed"; exit 1; }
-[ -s "$NAMES" ] && NI=(-i "$PWD/$NAMES")
 [ "$PHASE" = names ] && exit 0
 
 rm -f "$CODE" "$LOG" "$ENG"
 : > "$LOG"
 
 watch() {
-  local b=$1 out=$2 i=0 mb n
+  local b=$1 out=$2 i=0 mb n last
   while [ "$i" -lt "$b" ]; do
     sleep 60
     i=$((i + 60))
     mb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1048576 ))
-    n=$(grep -c '^{$' "$out" 2>/dev/null || echo 0)
-    echo "dump ${i}s ${mb}MB ${n:-0} funcs"
+    n=$(grep -c '^{$' "$out" 2>/dev/null || true)
+    if [ "$mb" -eq 0 ]; then
+      last=$(tail -1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-140)
+      echo "dump ${i}s 0MB r2: ${last:-silent}"
+      if [ "$i" -ge "$STALL" ] && [ -s .r2pid ]; then
+        echo "[-] no output for ${i}s, stopping r2"
+        tail -20 "$LOG" 2>/dev/null
+        touch .stall
+        kill -INT "$(cat .r2pid)" 2>/dev/null
+        sleep 10
+        kill -9 "$(cat .r2pid)" 2>/dev/null
+        return
+      fi
+    else
+      echo "dump ${i}s ${mb}MB ${n:-0} funcs"
+    fi
   done
 }
 
 dump() {
   local b=$1 c=$2 out=$3
   echo "dump start $c budget ${b}s"
+  rm -f .stall
   watch "$b" "$out" &
   local w=$!
-  kill_at "$b" "$R2" "${O[@]}" "${NI[@]}" -q -p "$PWD/$PROJ" -c "$c" "$BIN" > "$out" 2>> "$LOG"
+  kill_at "$b" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c "$c" "$BIN" > "$out" 2>> "$LOG"
   local r=$?
   kill "$w" 2>/dev/null
+  if [ -f .stall ]; then
+    return 2
+  fi
   return $r
 }
 
@@ -100,6 +118,11 @@ S=$(date +%s)
 dump "$MAIN" 'pdg @@f' "$CODE"
 RP=$?
 NB=$(grep -c '^{$' "$CODE" 2>/dev/null || true)
+if [ "$RP" = 2 ] || [ "${NB:-0}" -eq 0 ]; then
+  echo "[-] pdg produced no functions"
+  tail -30 "$LOG" 2>/dev/null
+  exit 1
+fi
 ENGINE=pdg
 RC=none
 MERGED=0

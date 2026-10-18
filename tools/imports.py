@@ -166,12 +166,16 @@ def main():
                     f.write(f'af {name} @ {address}; afn {name} @ {address}\n')
 
     if args.aflj and os.path.exists(args.aflj):
-        with open(args.aflj, 'r', encoding='utf-8') as f:
-            for row in json.load(f):
-                name = row.get('name') or ''
-                address = row.get('offset')
-                if name and isinstance(address, int) and not name.startswith('fcn.'):
-                    mapping.setdefault(name, address)
+        try:
+            with open(args.aflj, 'r', encoding='utf-8') as f:
+                rows = json.load(f)
+        except ValueError:
+            rows = []
+        for row in rows if isinstance(rows, list) else []:
+            name = row.get('name') or ''
+            address = row.get('offset')
+            if name and isinstance(address, int) and not name.startswith('fcn.'):
+                mapping.setdefault(name, address)
 
     payload = {
         'dylibs': libraries,
