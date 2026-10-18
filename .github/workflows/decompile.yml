@@ -195,6 +195,7 @@ jobs:
             decompiled.c
             binary
             imports.json
+            symbols.json
             engine.txt
           retention-days: 30
           if-no-files-found: warn

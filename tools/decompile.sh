@@ -29,32 +29,11 @@ kill_at() {
 
 IMPORTS=${IMPORTS_OUT:-imports.json}
 NAMES=${NAMES_OUT:-names.r2}
+SYMBOLS=${SYMBOLS_OUT:-symbols.json}
 SIGS=${SIG_DB:-}
 
-"$R2" "${O[@]}" -q -c isj -c q "$BIN" > .isj 2>> "$LOG" || { echo "[-] isj export failed"; exit 1; }
-python3 tools/binary.py --symbols "$BIN" > .syms.json 2>> "$LOG" || { echo "[-] chained fixups export failed"; exit 1; }
-python3 - "$IMPORTS" "$NAMES" "$SIGS" <<'PY' || { echo "[-] symbol table build failed"; exit 1; }
-import json, re, sys
-
-rows = {k: v for k, v in json.load(open('.syms.json')).items() if isinstance(v, int)}
-raw = open('.isj', errors='ignore').read()
-syms = json.loads(raw[raw.index('['):raw.rindex(']') + 1])
-for s in syms:
-    name = s.get('name') or ''
-    addr = s.get('vaddr') or 0
-    if name.startswith('sym.imp.') and addr:
-        name = name[8:].lstrip('_')
-        if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]*', name):
-            rows.setdefault(name, addr)
-if sys.argv[3]:
-    rows.update({k: v for k, v in json.load(open(sys.argv[3])).items() if isinstance(v, int)})
-json.dump(rows, open(sys.argv[1], 'w'))
-with open(sys.argv[2], 'w') as f:
-    for name, addr in rows.items():
-        if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,180}', name):
-            f.write(f'af {name} @ {addr}; afn {name} @ {addr}\n')
-print(f'symbols {len(rows)}')
-PY
+python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --r2 "$NAMES" --extra "$SIGS" 2>> "$LOG" \
+  || { echo "[-] symbol export failed"; exit 1; }
 
 NI=()
 [ -s "$NAMES" ] && NI=(-i "$PWD/$NAMES")

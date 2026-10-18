@@ -299,18 +299,3 @@ def bind_names(data):
     slots = chained_slots(data, start, base, sections)
     slots.update(classic_slots(data, start))
     return resolve_stubs(data, sections, slots)
-
-
-if __name__ == '__main__':
-    import json
-    import sys
-
-    if len(sys.argv) != 3 or sys.argv[1] != '--symbols':
-        raise SystemExit('[-] usage: binary.py --symbols <macho>')
-    try:
-        with open(sys.argv[2], 'rb') as handle:
-            payload = handle.read()
-        table = bind_names(payload)
-    except (BadImage, struct.error, OSError) as exc:
-        raise SystemExit(f'[-] {exc}')
-    print(json.dumps({name: addr for addr, name in table.items()}))

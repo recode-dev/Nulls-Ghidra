@@ -11,5 +11,5 @@ temp/
 index_data/
 imports.json
 names.r2
-.isj
-.syms.json
+symbols.json
+*.pdc
