@@ -53,6 +53,12 @@ def main():
     args = parse_args()
     with open(args.bin, 'rb') as f:
         data = f.read()
+    if data[:4] == b'\x7fELF':
+        payload = {'starts': [], 'lsda': []}
+        with open(args.out, 'w') as f:
+            json.dump(payload, f)
+        print('[+] elf image, unwind skipped')
+        return
     _start, _cputype, base, sections = macho_image(data)
     info = section(sections, '__unwind_info')
     version = 0

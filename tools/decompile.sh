@@ -29,10 +29,38 @@ mkdir -p index_data
 rm -f "$LOG"
 : > "$LOG"
 
-python3 "$SCRIPTS/thin.py" "$BIN" "$THIN" || { echo "[-] thin failed"; exit 1; }
+FORMAT=$(python3 - "$BIN" <<'PY'
+import sys
 
-python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --names "$NAMES" 2>> "$LOG" \
-  || { echo "[-] symbol export failed"; exit 1; }
+data = open(sys.argv[1], 'rb').read(20)
+if data[:4] != b'\x7fELF':
+    print('macho')
+elif data[4] == 1:
+    print('elf32')
+else:
+    print('elf64')
+PY
+)
+
+ARCH_FLAGS=""
+if [ "$FORMAT" = elf32 ]; then
+  ARCH_FLAGS="-processor ARM:LE:32:v7"
+  THIN="$BIN"
+elif [ "$FORMAT" = elf64 ]; then
+  ARCH_FLAGS="-processor AARCH64:LE:64:v8A"
+  THIN="$BIN"
+else
+  python3 "$SCRIPTS/thin.py" "$BIN" "$THIN" || { echo "[-] thin failed"; exit 1; }
+fi
+
+if [ "$FORMAT" = macho ]; then
+  python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --names "$NAMES" 2>> "$LOG" \
+    || { echo "[-] symbol export failed"; exit 1; }
+else
+  echo '{}' > "$SYMBOLS"
+  echo '{}' > "$IMPORTS"
+  : > "$NAMES"
+fi
 
 [ "$PHASE" = names ] && exit 0
 
@@ -46,7 +74,7 @@ mkdir -p "$PROJ"
 S=$(date +%s)
 timeout -s INT --kill-after=60 "$BUDGET" "$HEADLESS" \
   "$PROJ" ng \
-  -import "$THIN" \
+  -import "$THIN" $ARCH_FLAGS \
   -scriptPath "$SCRIPTS" \
   -preScript Dump.java pre \
   -postScript Dump.java names "$PWD/$CODE" "$PWD/$FUNCS" "$PWD/$NAMES" \

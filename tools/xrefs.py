@@ -11,7 +11,8 @@ import re
 import struct
 import sys
 
-from binary import BadImage, CPU_TYPE_ARM64, macho_image
+from binary import BadImage, CPU_TYPE_ARM64, load_image, is_elf
+from elf import elf_relocations
 
 FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
@@ -130,11 +131,40 @@ def make_stub(rva, address, section):
     }
 
 
-def arm64_text(data, sections):
+def text_section(data, sections):
+    for name in ('__text', '.text'):
+        for section in sections:
+            if section['sect'] == name and section['size']:
+                return data[section['fileoff']:section['fileoff'] + section['size']], section['addr']
     for section in sections:
-        if section['sect'] == '__text' and section['size'] and section['flags'] & 0x80000000:
+        if section.get('exec') and section['size']:
             return data[section['fileoff']:section['fileoff'] + section['size']], section['addr']
     return None
+
+
+def arm32_starts(words, text_addr, base):
+    prologue = set()
+    thin = set()
+    push_lr = 0xB500
+    sub_sp = 0xB080
+    stmdb_lr = 0xE92D0000
+    str_lr = 0xE52DE004
+    for index in range(1, len(words)):
+        word = words[index]
+        framed = ((word & 0xFF00) == push_lr and (word & 0x100)) or (word & 0xFF80) == sub_sp \
+            or (word & 0xFFFF0000) == stmdb_lr or word == str_lr
+        ending = (word & 0xFF00) == 0xBD00 or word == 0x4770 or word == 0xE12FFF1E \
+            or (word & 0xFFFF8000) == 0xE8BD8000
+        if not framed and not ending:
+            continue
+        prev = words[index - 1]
+        boundary = (prev & 0xFF00) == 0xBD00 or prev == 0x4770 or prev == 0xE12FFF1E \
+            or (prev & 0xFFFF8000) == 0xE8BD8000
+        if boundary:
+            target = text_addr + index * 4 - base
+            (prologue if framed else thin).add(target)
+    thin -= prologue
+    return prologue | thin, thin
 
 
 def adrp_string_xrefs(data, located, sections, functions, strings):
@@ -213,6 +243,46 @@ def adrp_string_xrefs(data, located, sections, functions, strings):
         if text_ is None:
             continue
         key = func_for(text_addr + site)
+        if key:
+            result.setdefault(text_, set()).add(key)
+    return result
+
+
+def elf_string_xrefs(raw, sections, functions, strings, base):
+    addr_to_string = {v['address']: k for k, v in strings.items() if v.get('address')}
+    if not addr_to_string:
+        return {}
+    starts = sorted((v['address'], k) for k, v in functions.items() if v.get('address'))
+    start_addrs = [s[0] for s in starts]
+
+    def func_for(addr):
+        i = bisect.bisect_right(start_addrs, addr) - 1
+        if i < 0:
+            return None
+        return starts[i][1]
+
+    code = [s for s in sections if s.get('exec')]
+    result = {}
+    for rel in elf_relocations(raw, sections):
+        target = rel['addend']
+        if target is None:
+            for section in sections:
+                if section['addr'] <= rel['offset'] < section['addr'] + section['size']:
+                    off = section['fileoff'] + rel['offset'] - section['addr']
+                    if raw[4] == 1 and off + 4 <= len(raw):
+                        target = struct.unpack_from('<I', raw, off)[0]
+                    elif off + 8 <= len(raw):
+                        target = struct.unpack_from('<Q', raw, off)[0]
+                    break
+        if not target:
+            continue
+        text_ = addr_to_string.get(target + base) or addr_to_string.get(target)
+        if not text_:
+            continue
+        site = rel['offset'] + base
+        if not any(s['addr'] <= site < s['addr'] + s['size'] for s in code):
+            continue
+        key = func_for(site)
         if key:
             result.setdefault(text_, set()).add(key)
     return result
@@ -502,12 +572,13 @@ def main():
 
     with open(args.bin, 'rb') as f:
         raw = f.read()
-    start, cputype, base, sections = macho_image(raw)
-    if cputype != CPU_TYPE_ARM64:
-        raise BadImage(f'cputype 0x{cputype:x} is not arm64')
-    located = arm64_text(raw, sections)
+    start, machine, base, sections = load_image(raw)
+    if machine not in (CPU_TYPE_ARM64, 40):
+        raise BadImage(f'machine 0x{machine:x} is not supported')
+    arch = 'arm32' if machine == 40 else 'arm64'
+    located = text_section(raw, sections)
     if located is None:
-        raise BadImage('no executable __text section')
+        raise BadImage('no executable section')
     image_size = len(raw) - start
     name_map = {}
     names_path = args.names or ('index_data/imports.json' if os.path.exists('index_data/imports.json') else '')
@@ -529,30 +600,41 @@ def main():
     words.frombytes(blob[:len(blob) & ~3])
     if sys.byteorder != 'little':
         words.byteswap()
-    ret = 0xD65F03C0
-    for i in range(1, len(words)):
-        word = words[i]
-        framed = ((word & 0xFF8003FF) in (0xD10003FF, 0xD14003FF)
-                  or ((word & 0xFFC00000) == 0xA9800000 and ((word >> 5) & 0x1F) == 31))
-        if not framed and word != ret:
-            continue
-        prev = words[i - 1]
-        boundary = prev == ret or prev == 0xD503245F or (prev & 0xFC000000) == 0x14000000
-        if not boundary and prev == 0xD503201F and i > 1:
-            earlier = words[i - 2]
-            boundary = earlier == ret or (earlier & 0xFC000000) == 0x14000000
-        if boundary:
-            (prologue_starts if framed else thin_starts).add(text_addr + i * 4 - base)
+    if arch == 'arm64':
+        ret = 0xD65F03C0
+        for i in range(1, len(words)):
+            word = words[i]
+            framed = ((word & 0xFF8003FF) in (0xD10003FF, 0xD14003FF)
+                      or ((word & 0xFFC00000) == 0xA9800000 and ((word >> 5) & 0x1F) == 31))
+            if not framed and word != ret:
+                continue
+            prev = words[i - 1]
+            boundary = prev == ret or prev == 0xD503245F or (prev & 0xFC000000) == 0x14000000
+            if not boundary and prev == 0xD503201F and i > 1:
+                earlier = words[i - 2]
+                boundary = earlier == ret or (earlier & 0xFC000000) == 0x14000000
+            if boundary:
+                (prologue_starts if framed else thin_starts).add(text_addr + i * 4 - base)
+    else:
+        arm_pro, arm_thin = arm32_starts(words, text_addr, base)
+        prologue_starts |= arm_pro
+        thin_starts |= arm_thin
     code_lo = text_addr
     code_hi = text_addr + len(blob)
     pointed = set()
+    width = 4 if arch == 'arm32' else 8
+    reader = '<I' if width == 4 else '<Q'
     for section in sections:
-        if section['sect'] == '__text' or not section['size'] or not section['fileoff']:
+        if section.get('exec') or not section['size'] or not section['fileoff']:
             continue
         begin = section['fileoff']
-        for off in range(begin, min(begin + section['size'], len(raw)) - 7, 8):
-            value = struct.unpack_from('<Q', raw, off)[0]
+        for off in range(begin, min(begin + section['size'], len(raw)) - (width - 1), width):
+            value = struct.unpack_from(reader, raw, off)[0]
             if not value:
+                continue
+            if width == 4:
+                if code_lo <= value < code_hi:
+                    pointed.add(value)
                 continue
             for mask in ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1):
                 if code_lo <= (value & mask) < code_hi:
@@ -582,7 +664,12 @@ def main():
             entry['has_lsda'] = True
     strings = bin_strings(raw, sections, args.min_string)
 
-    for text_, keys in adrp_string_xrefs(raw, located, sections, functions, strings).items():
+    found = {}
+    if arch == 'arm32' or is_elf(raw):
+        found = elf_string_xrefs(raw, sections, functions, strings, base)
+    else:
+        found = adrp_string_xrefs(raw, located, sections, functions, strings)
+    for text_, keys in found.items():
         merged = set(strings_xref.get(text_, []))
         merged.update(keys)
         strings_xref[text_] = sorted(merged)

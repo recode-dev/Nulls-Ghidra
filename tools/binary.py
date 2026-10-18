@@ -2,6 +2,9 @@
 
 import struct
 
+from elf import elf_image
+
+ELF_MAGIC = b'\x7fELF'
 MH_MAGIC_64 = 0xfeedfacf
 FAT_MAGICS = (0xcafebabe, 0xcafebabf)
 CPU_TYPE_ARM64 = 0x0100000c
@@ -94,7 +97,8 @@ def macho_image(data):
                 if (flags & 0xFF) in ZEROFILL:
                     continue
                 sections.append({'seg': segname, 'sect': sectname, 'addr': addr, 'size': length,
-                                 'fileoff': start + offset, 'flags': flags})
+                                 'fileoff': start + offset, 'flags': flags,
+                                 'exec': bool(flags & 0x80000000)})
         cur += cmdsize
     return start, cputype, base or 0, sections
 
@@ -299,3 +303,14 @@ def bind_names(data):
     slots = chained_slots(data, start, base, sections)
     slots.update(classic_slots(data, start))
     return resolve_stubs(data, sections, slots)
+
+
+
+def is_elf(data):
+    return len(data) >= 4 and data[:4] == ELF_MAGIC
+
+
+def load_image(data):
+    if is_elf(data):
+        return elf_image(data)
+    return macho_image(data)
