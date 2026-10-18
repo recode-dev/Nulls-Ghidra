@@ -18,9 +18,9 @@ FUNC_RE = re.compile(
 )
 CALL_RE = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
 GENERIC_FUNC_RE = re.compile(
-    r'\n([A-Za-z0-9_* ]+?)\s+([A-Za-z_$][A-Za-z0-9_.$]*)\s*\(([^)]*)\)\s*\n?\s*\{'
+    r'\n([A-Za-z0-9_* ]+?)\s+([A-Za-z_$][A-Za-z0-9_.$:~]*)\s*\(([^)]*)\)\s*\n?\s*\{'
 )
-NAME_CALL_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(')
+NAME_CALL_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_.:~]*)\s*\(')
 VCALL_RE = re.compile(
     r'\*\*\s*\(\s*code\s*\*\s*\*\s*\)\s*\(\s*\*?\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*'
     r'(0x[0-9a-fA-F]+|\d+)\s*\)'

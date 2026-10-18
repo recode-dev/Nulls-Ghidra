@@ -82,6 +82,10 @@ jobs:
           path: |
             r2proj
             decompiled.c
+            imports.json
+            names.r2
+            symbols.json
+            .aflj
           key: decompile-${{ env.BIN_HASH }}-${{ needs.fetch.outputs.url_hash }}
           restore-keys: |
             decompile-${{ env.BIN_HASH }}-
@@ -90,19 +94,27 @@ jobs:
         run: |
           proj=missing
           code=missing
+          sym=missing
           if [ -s r2proj ]; then proj=ready; fi
           if [ -s decompiled.c ]; then code=ready; fi
+          if [ -s imports.json ]; then sym=ready; fi
           echo "proj=$proj" >> "$GITHUB_OUTPUT"
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "cache project=$proj dump=$code"
+          echo "sym=$sym" >> "$GITHUB_OUTPUT"
+          echo "cache project=$proj dump=$code symbols=$sym"
 
-      - if: ${{ steps.state.outputs.proj != 'ready' || steps.state.outputs.code != 'ready' }}
+      - if: ${{ steps.state.outputs.proj != 'ready' || steps.state.outputs.code != 'ready' || steps.state.outputs.sym != 'ready' }}
         run: bash tools/setup.sh
 
       - if: ${{ steps.state.outputs.proj != 'ready' }}
         env:
           PHASE: analyze
           BUDGET: ${{ inputs.seconds || '18000' }}
+        run: bash tools/decompile.sh
+
+      - if: ${{ steps.state.outputs.sym != 'ready' }}
+        env:
+          PHASE: names
         run: bash tools/decompile.sh
 
       - if: ${{ steps.state.outputs.code != 'ready' }}

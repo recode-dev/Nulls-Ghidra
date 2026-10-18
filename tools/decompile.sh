@@ -30,14 +30,8 @@ kill_at() {
 IMPORTS=${IMPORTS_OUT:-imports.json}
 NAMES=${NAMES_OUT:-names.r2}
 SYMBOLS=${SYMBOLS_OUT:-symbols.json}
-SIGS=${SIG_DB:-}
-
-python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --r2 "$NAMES" --extra "$SIGS" 2>> "$LOG" \
-  || { echo "[-] symbol export failed"; exit 1; }
 
 NI=()
-[ -s "$NAMES" ] && NI=(-i "$PWD/$NAMES")
-
 AE=0
 if [ -f .ae ]; then AE=$(cat .ae); fi
 
@@ -60,6 +54,17 @@ if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
   fi
 fi
 [ "$PHASE" = analyze ] && exit 0
+
+AFLJ=""
+if [ -s "$PROJ" ] && command -v "$R2" >/dev/null 2>&1; then
+  "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c aflj -c q "$BIN" > .aflj 2>> "$LOG" || true
+  [ -s .aflj ] && AFLJ=.aflj
+fi
+
+python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --r2 "$NAMES" --aflj "$AFLJ" 2>> "$LOG" \
+  || { echo "[-] symbol export failed"; exit 1; }
+[ -s "$NAMES" ] && NI=(-i "$PWD/$NAMES")
+[ "$PHASE" = names ] && exit 0
 
 rm -f "$CODE" "$LOG" "$ENG"
 : > "$LOG"
