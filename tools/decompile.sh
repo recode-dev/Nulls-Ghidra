@@ -12,7 +12,7 @@ AFLJ=${AFLJ_OUT:-.aflj}
 R2=${R2BIN:-r2}
 STALL=${STALL:-600}
 
-O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=true -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
+O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=false -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
 
 kill_at() {
   local b=$1
@@ -30,26 +30,28 @@ kill_at() {
 }
 
 watch() {
-  local b=$1 i=0 mb n last
+  local b=$1 i=0 bytes prev=-1 idle=0 n last
   while [ "$i" -lt "$b" ]; do
     sleep 60
     i=$((i + 60))
-    mb=$(( $(wc -c < "$RAW" 2>/dev/null || echo 0) / 1048576 ))
+    bytes=$(wc -c < "$RAW" 2>/dev/null || echo 0)
     n=$(grep -c '^{$' "$RAW" 2>/dev/null || true)
-    if [ "$mb" -eq 0 ]; then
-      last=$(tail -1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-140)
-      echo "dump ${i}s 0MB r2: ${last:-silent}"
-      if [ "$i" -ge "$STALL" ] && [ -s .r2pid ]; then
-        echo "[-] no output for ${i}s, stopping r2"
-        tail -20 "$LOG" 2>/dev/null
-        touch .stall
-        kill -INT "$(cat .r2pid)" 2>/dev/null
-        sleep 10
-        kill -9 "$(cat .r2pid)" 2>/dev/null
-        return
-      fi
+    last=$(tail -1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-100)
+    echo "dump ${i}s $((bytes / 1048576))MB ${n:-0} funcs ${last:+| $last}"
+    if [ "$bytes" -eq "$prev" ]; then
+      idle=$((idle + 60))
     else
-      echo "dump ${i}s ${mb}MB ${n:-0} funcs"
+      idle=0
+    fi
+    prev=$bytes
+    if [ "$idle" -ge "$STALL" ] && [ -s .r2pid ]; then
+      echo "[-] no output for ${idle}s, stopping r2"
+      tail -20 "$LOG" 2>/dev/null
+      touch .stall
+      kill -INT "$(cat .r2pid)" 2>/dev/null
+      sleep 10
+      kill -9 "$(cat .r2pid)" 2>/dev/null
+      return
     fi
   done
 }
