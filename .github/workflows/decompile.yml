@@ -39,7 +39,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: bin_cache
-          key: bin-${{ steps.uh.outputs.URL_HASH }}
+          key: bin-${{ steps.uh.outputs.URL_HASH }}-${{ inputs.format || 'auto' }}
 
       - id: g
         env:
