@@ -83,6 +83,7 @@ jobs:
             decompiled.c
             imports.json
             symbols.json
+            structs.h
             .aflj
           key: dump-${{ env.BIN_HASH }}
           restore-keys: |
@@ -155,6 +156,12 @@ jobs:
           python3 tools/classes.py \
             --index_dir index_data \
             --out index_data/classes.json
+
+      - run: |
+          python3 tools/structs.py \
+            --index_dir index_data \
+            --out structs.h \
+            --json index_data/structs.json
 
       - run: |
           python3 - <<'PY'
