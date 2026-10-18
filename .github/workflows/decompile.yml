@@ -9,11 +9,6 @@ on:
       seconds:
         description: total analysis budget in seconds
         default: '18000'
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/decompile.yml'
-      - 'tools/**'
 
 permissions:
   contents: read
@@ -88,6 +83,16 @@ jobs:
           key: dump-${{ env.BIN_HASH }}
           restore-keys: |
             dump-
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/ghidra
+          key: ghidra-12.1.4
 
       - id: state
         run: |
@@ -205,6 +210,6 @@ jobs:
             imports.json
             symbols.json
             engine.txt
-            r2.log
+            ghidra.log
           retention-days: 30
           if-no-files-found: warn

@@ -13,7 +13,6 @@ imports.json
 names.r2
 symbols.json
 .aflj
-.r2pid
-.stall
-r2.out
-*.pdc
+.ghidra_project/
+binary.thin
+ghidra.log
