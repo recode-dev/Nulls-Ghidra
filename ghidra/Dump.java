@@ -44,18 +44,38 @@ public class Dump extends GhidraScript {
             println("renamed " + renamed);
         }
 
+        List<Function> funcs = collect();
+        println("functions " + funcs.size());
+
+        if ("names".equals(mode)) {
+            writeFunctions(jsonPath, funcs);
+            return;
+        }
+
+        int from = 0;
+        int to = funcs.size();
+        if ("shard".equals(mode) && args.length > 5) {
+            from = Math.max(0, Integer.parseInt(args[4]));
+            to = Math.min(funcs.size(), Integer.parseInt(args[5]));
+        }
+        if (from >= to) {
+            println("empty shard " + from + " " + to);
+            return;
+        }
+
+        decompile(funcs.subList(from, to), codePath);
+    }
+
+    private List<Function> collect() {
         List<Function> funcs = new ArrayList<>();
         FunctionIterator iterator = currentProgram.getFunctionManager().getFunctions(true);
         while (iterator.hasNext()) {
             funcs.add(iterator.next());
         }
-        writeFunctions(jsonPath, funcs);
-        println("functions " + funcs.size());
+        return funcs;
+    }
 
-        if ("names".equals(mode)) {
-            return;
-        }
-
+    private void decompile(List<Function> funcs, String codePath) throws Exception {
         DecompInterface dec = new DecompInterface();
         dec.toggleCCode(true);
         dec.toggleSyntaxTree(false);
@@ -161,8 +181,7 @@ public class Dump extends GhidraScript {
         if (clean.isEmpty()) {
             return clean;
         }
-        char first = clean.charAt(0);
-        if (Character.isDigit(first)) {
+        if (Character.isDigit(clean.charAt(0))) {
             clean = "_" + clean;
         }
         return clean;

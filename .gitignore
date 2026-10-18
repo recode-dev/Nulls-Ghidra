@@ -13,6 +13,8 @@ imports.json
 names.tsv
 symbols.json
 funcs.json
-.ghidra_project/
+ghidra_project*/
+decompiled.c.part*
+.shard*.rc
 binary.thin
 ghidra.log
