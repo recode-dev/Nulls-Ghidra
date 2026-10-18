@@ -88,6 +88,30 @@ jobs:
           restore-keys: |
             decompile-${{ env.BIN_HASH }}-
 
+      - name: seed dump from the last artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -s decompiled.c ]; then
+            echo "dump restored from cache"
+            exit 0
+          fi
+          NAME="main_binary-${BIN_HASH:0:12}"
+          URL=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME" \
+            --jq '.artifacts[0].archive_download_url // ""' 2>/dev/null || true)
+          if [ -z "$URL" ]; then
+            echo "no artifact $NAME"
+            exit 0
+          fi
+          curl -sL -H "Authorization: Bearer $GH_TOKEN" -o seed.zip "$URL"
+          unzip -o seed.zip decompiled.c imports.json symbols.json >/dev/null 2>&1 || true
+          rm -f seed.zip
+          if [ -s decompiled.c ]; then
+            echo "seeded dump from $NAME $(wc -c < decompiled.c) bytes"
+          else
+            echo "seed failed"
+          fi
+
       - id: state
         run: |
           code=missing
