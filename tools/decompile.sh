@@ -7,8 +7,8 @@ PHASE=${PHASE:-all}
 CODE=${CODE_OUT:-decompiled.c}
 ENG=${ENGINE_OUT:-engine.txt}
 LOG=${GHIDRA_LOG:-ghidra.log}
-AFLJ=${AFLJ_OUT:-.aflj}
-NAMES=${NAMES_OUT:-names.r2}
+FUNCS=${FUNCS_OUT:-funcs.json}
+NAMES=${NAMES_OUT:-names.tsv}
 THIN=${THIN_OUT:-binary.thin}
 GHIDRA_HOME=${GHIDRA_HOME:-$HOME/ghidra}
 HEADLESS=$GHIDRA_HOME/support/analyzeHeadless
@@ -26,14 +26,14 @@ rm -f "$LOG"
 
 python3 "$SCRIPTS/thin.py" "$BIN" "$THIN" || { echo "[-] thin failed"; exit 1; }
 
-python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --r2 "$NAMES" 2>> "$LOG" \
+python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --names "$NAMES" 2>> "$LOG" \
   || { echo "[-] symbol export failed"; exit 1; }
 
 [ "$PHASE" = names ] && exit 0
 
 [ -x "$HEADLESS" ] || { echo "[-] missing $HEADLESS"; exit 1; }
 
-rm -f "$AFLJ" "$ENG"
+rm -f "$FUNCS" "$ENG"
 [ "$PHASE" != names ] && rm -f "$CODE"
 
 mkdir -p "$PROJ"
@@ -44,7 +44,7 @@ timeout -s INT --kill-after=60 "$BUDGET" "$HEADLESS" \
   -import "$THIN" \
   -scriptPath "$SCRIPTS" \
   -preScript Dump.java pre \
-  -postScript Dump.java all "$PWD/$CODE" "$PWD/$AFLJ" "$PWD/$NAMES" \
+  -postScript Dump.java all "$PWD/$CODE" "$PWD/$FUNCS" "$PWD/$NAMES" \
   -analysisTimeoutPerFile "$BUDGET" \
   -deleteProject >> "$LOG" 2>&1
 RC=$?

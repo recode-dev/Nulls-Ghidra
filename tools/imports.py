@@ -21,8 +21,7 @@ def parse_args():
     p.add_argument('--bin', required=True, help='Mach-O binary')
     p.add_argument('--out', default='symbols.json', help='rich JSON output')
     p.add_argument('--map', default='', help='flat {name: address} map for xrefs --names')
-    p.add_argument('--r2', default='', help='r2 command file with af/afn for every name')
-    p.add_argument('--aflj', default='', help='r2 aflj json with function names, merged into the map only')
+    p.add_argument('--names', default='', help='flat name table, one name and address per line')
     p.add_argument('--extra', default='', help='extra {name: address} json merged into the map')
     return p.parse_args()
 
@@ -158,24 +157,12 @@ def main():
         with open(args.extra, 'r', encoding='utf-8') as f:
             mapping.update({k: v for k, v in json.load(f).items() if isinstance(v, int)})
 
-    if args.r2:
+    if args.names:
         allowed = re.compile(r'[A-Za-z_][A-Za-z0-9_.]{0,180}')
-        with open(args.r2, 'w', encoding='utf-8') as f:
+        with open(args.names, 'w', encoding='utf-8') as f:
             for name, address in mapping.items():
                 if allowed.fullmatch(name):
-                    f.write(f'af {name} @ {address}; afn {name} @ {address}\n')
-
-    if args.aflj and os.path.exists(args.aflj):
-        try:
-            with open(args.aflj, 'r', encoding='utf-8') as f:
-                rows = json.load(f)
-        except ValueError:
-            rows = []
-        for row in rows if isinstance(rows, list) else []:
-            name = row.get('name') or ''
-            address = row.get('offset')
-            if name and isinstance(address, int) and not name.startswith('fcn.'):
-                mapping.setdefault(name, address)
+                    f.write(f'{name}\t0x{address:x}\n')
 
     payload = {
         'dylibs': libraries,

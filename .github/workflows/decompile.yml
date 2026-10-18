@@ -79,7 +79,7 @@ jobs:
             imports.json
             symbols.json
             structs.h
-            .aflj
+            funcs.json
           key: dump-${{ env.BIN_HASH }}
           restore-keys: |
             dump-
@@ -210,6 +210,7 @@ jobs:
             imports.json
             symbols.json
             engine.txt
+            funcs.json
             ghidra.log
           retention-days: 30
           if-no-files-found: warn

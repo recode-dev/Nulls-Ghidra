@@ -10,9 +10,9 @@ tmp/
 temp/
 index_data/
 imports.json
-names.r2
+names.tsv
 symbols.json
-.aflj
+funcs.json
 .ghidra_project/
 binary.thin
 ghidra.log

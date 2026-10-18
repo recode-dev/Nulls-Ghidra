@@ -31,7 +31,7 @@ public class Dump extends GhidraScript {
         String[] args = getScriptArgs();
         String mode = args.length > 0 ? args[0] : "all";
         String codePath = args.length > 1 && !args[1].isEmpty() ? args[1] : "decompiled.c";
-        String jsonPath = args.length > 2 && !args[2].isEmpty() ? args[2] : ".aflj";
+        String jsonPath = args.length > 2 && !args[2].isEmpty() ? args[2] : "funcs.json";
         String namesPath = args.length > 3 ? args[3] : "";
 
         if ("pre".equals(mode)) {
@@ -119,20 +119,17 @@ public class Dump extends GhidraScript {
                 new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (!line.startsWith("afn ")) {
+                int tab = line.indexOf('\t');
+                if (tab <= 0) {
                     continue;
                 }
-                int at = line.indexOf(" @ ");
-                if (at < 0) {
-                    continue;
-                }
-                String name = sanitize(line.substring(4, at).trim());
+                String name = sanitize(line.substring(0, tab).trim());
                 if (name.isEmpty()) {
                     continue;
                 }
                 long value;
                 try {
-                    value = address(line.substring(at + 3).trim());
+                    value = address(line.substring(tab + 1).trim());
                 } catch (NumberFormatException error) {
                     continue;
                 }
