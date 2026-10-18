@@ -11,6 +11,7 @@ def parse_args():
     p.add_argument('--out', default='', help='output classes JSON path')
     p.add_argument('--max-offset', type=lambda v: int(v, 0), default=0x20000,
                    help='largest value treated as a struct field offset')
+    p.add_argument('--field', default='', help='print classes whose layout contains this field offset (hex)')
     return p.parse_args()
 
 
@@ -19,6 +20,10 @@ def load(path, default):
         return default
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def offset_arg(text):
+    return int(text[2:] if text.lower().startswith('0x') else text, 16)
 
 
 def field_layout(fields, methods, max_offset):
@@ -103,6 +108,15 @@ def main():
 
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(classes, f, indent=2)
+
+    if args.field:
+        needle = f'0x{offset_arg(args.field):x}'
+        rows = [(name, entry, field) for name, entry in classes.items()
+                for field in entry['field_layout'] if field['offset'] == needle]
+        print(f'[+] field {needle} -> {len(rows)} classes')
+        for name, entry, field in sorted(rows):
+            print(f'{name}  vtable={entry["vtable"]}  reads={field["reads"]} writes={field["writes"]} '
+                  f'width={field["width"]} methods={field["methods"]}')
 
     with_fields = sum(1 for entry in classes.values() if entry['fields'])
     with_ctors = sum(1 for entry in classes.values() if entry.get('constructors'))

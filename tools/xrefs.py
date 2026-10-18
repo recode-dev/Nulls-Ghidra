@@ -5,6 +5,7 @@ import array
 import bisect
 import hashlib
 import json
+import math
 import os
 import re
 import struct
@@ -43,14 +44,16 @@ STRING_SECTIONS = ('__cstring', '__objc_methname', '__objc_classname', '__objc_m
 
 def parse_args():
     p = argparse.ArgumentParser(description='Index functions, strings, xrefs and call graph of a decompiled dump')
-    p.add_argument('--bin', required=True, help='Mach-O binary the dump was produced from')
-    p.add_argument('--code', required=True, help='decompiled.c')
+    p.add_argument('--bin', help='Mach-O binary the dump was produced from')
+    p.add_argument('--code', help='decompiled.c')
     p.add_argument('--out', default='index_data', help='output index directory')
     p.add_argument('--max-field-offset', type=lambda v: int(v, 0), default=0x20000,
                    help='largest value treated as a struct field offset')
     p.add_argument('--min-string', type=int, default=4, help='shortest binary string to keep')
     p.add_argument('--unwind', default='', help='unwind.json path, defaults to <out>/unwind.json')
     p.add_argument('--names', default='', help='symbol map {name: address} for renamed functions')
+    p.add_argument('--query', default='', help='search the existing index by words or by a hex offset, no rebuild')
+    p.add_argument('--limit', type=int, default=20, help='maximum rows printed by --query')
     return p.parse_args()
 
 
@@ -399,8 +402,97 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
     return functions, strings_xref, data_refs, edges
 
 
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def format_row(entry, note=''):
+    size = entry.get('size_bytes')
+    callers = len(entry.get('callers') or [])
+    label = f'{size}B' if size else '?'
+    return f"0x{entry['offset']:x}  {entry['name']}  {label}  callers={callers}  {note}".rstrip()
+
+
+def search(args):
+    index = args.out
+    functions = load_json(os.path.join(index, 'functions.json'), None)
+    if not functions:
+        raise SystemExit(f'[-] {os.path.join(index, "functions.json")} not found, build the index first')
+    query = args.query.strip()
+    if not query:
+        raise SystemExit('[-] empty query')
+
+    if re.fullmatch(r'0x[0-9a-fA-F]+', query) or re.fullmatch(r'[0-9]+', query):
+        value = int(query, 16)
+        key = f'0x{value:x}'
+        entry = functions.get(key)
+        if entry:
+            print(format_row(entry))
+            for text, keys in load_json(os.path.join(index, 'strings_xref.json'), {}).items():
+                if key in keys:
+                    print(f'  xref "{text}"')
+            for callee, sites in list((entry.get('call_sites') or {}).items())[:10]:
+                print(f'  call {callee} x{sites}')
+            for caller in (entry.get('callers') or [])[:10]:
+                print(f'  caller {caller}')
+            return
+        rows = [item for item in functions.values() if value in (item.get('field_offsets') or [])]
+        if not rows:
+            raise SystemExit(f'[-] nothing at {key}')
+        print(f'[+] field {key} -> {len(rows)} functions')
+        for item in sorted(rows, key=lambda item: item['offset']):
+            print(format_row(item, 'write' if value in (item.get('field_writes') or []) else 'read'))
+        return
+
+    xrefs = load_json(os.path.join(index, 'strings_xref.json'), {})
+    tokens = sorted({token for token in re.split(r'[^a-z0-9_]+', query.lower()) if len(token) > 1})
+    if not tokens:
+        raise SystemExit('[-] query needs at least one token of 2+ characters')
+    df = {}
+    for text in xrefs:
+        low = text.lower()
+        for token in tokens:
+            if token in low:
+                df[token] = df.get(token, 0) + 1
+    if not df:
+        raise SystemExit(f'[-] no strings match "{query}"')
+    weight = {token: math.log(1.0 + max(1, len(xrefs)) / count) for token, count in df.items()}
+
+    hits = {}
+    for text, keys in xrefs.items():
+        low = text.lower()
+        score = sum(weight[token] for token in df if token in low)
+        if not score:
+            continue
+        for key in keys:
+            row = hits.setdefault(key, [0.0, []])
+            row[0] += score
+            if text not in row[1]:
+                row[1].append(text)
+    for key, item in functions.items():
+        if any(token in item['name'].lower() for token in tokens):
+            hits.setdefault(key, [0.0, []])[0] += 5.0
+    if not hits:
+        raise SystemExit(f'[-] no functions match "{query}"')
+
+    ordered = sorted(hits.items(), key=lambda item: (-item[1][0], item[0]))
+    print(f'[+] "{query}" -> {len(ordered)} functions, showing {min(args.limit, len(ordered))}')
+    for key, (_score, texts) in ordered[:args.limit]:
+        item = functions.get(key)
+        if item is None:
+            continue
+        print(format_row(item, ' '.join(f'"{text}"' for text in texts[:4])))
+
+
 def main():
     args = parse_args()
+    if args.query:
+        return search(args)
+    if not args.bin or not args.code:
+        raise SystemExit('[-] --bin and --code are required to build the index')
     os.makedirs(args.out, exist_ok=True)
 
     with open(args.bin, 'rb') as f:
