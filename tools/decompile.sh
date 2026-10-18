@@ -36,6 +36,8 @@ python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --r2 "$N
 rm -f "$AFLJ" "$ENG"
 [ "$PHASE" != names ] && rm -f "$CODE"
 
+mkdir -p "$PROJ"
+
 S=$(date +%s)
 timeout -s INT --kill-after=60 "$BUDGET" "$HEADLESS" \
   "$PROJ" ng \

@@ -102,7 +102,6 @@ public class Dump extends GhidraScript {
         String[][] options = {
             {"Decompiler Parameter ID", "true"},
             {"Decompiler Switch Analysis", "true"},
-            {"Decompiler Stack Analysis", "true"},
             {"Create Address Tables", "true"},
         };
         for (String[] pair : options) {
