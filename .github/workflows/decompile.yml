@@ -80,7 +80,6 @@ jobs:
         id: decompile-cache
         with:
           path: |
-            r2proj
             decompiled.c
             imports.json
             symbols.json
@@ -91,29 +90,21 @@ jobs:
 
       - id: state
         run: |
-          proj=missing
           code=missing
           sym=missing
-          if [ -s r2proj ]; then proj=ready; fi
           if [ -s decompiled.c ]; then code=ready; fi
           if [ -s imports.json ]; then sym=ready; fi
-          echo "proj=$proj" >> "$GITHUB_OUTPUT"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "sym=$sym" >> "$GITHUB_OUTPUT"
-          echo "cache project=$proj dump=$code symbols=$sym"
+          echo "cache dump=$code symbols=$sym"
 
-      - if: ${{ steps.state.outputs.proj != 'ready' || steps.state.outputs.code != 'ready' || steps.state.outputs.sym != 'ready' }}
+      - if: ${{ steps.state.outputs.code != 'ready' || steps.state.outputs.sym != 'ready' }}
         run: bash tools/setup.sh
-
-      - if: ${{ steps.state.outputs.proj != 'ready' }}
-        env:
-          PHASE: analyze
-          BUDGET: ${{ inputs.seconds || '18000' }}
-        run: bash tools/decompile.sh
 
       - if: ${{ steps.state.outputs.sym != 'ready' }}
         env:
           PHASE: names
+          BUDGET: '3600'
         run: bash tools/decompile.sh
 
       - if: ${{ steps.state.outputs.code != 'ready' }}
@@ -188,7 +179,6 @@ jobs:
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Cache Hit | ${{ steps.decompile-cache.outputs.cache-hit == 'true' }} |"
-            echo "| Cached project | ${{ steps.state.outputs.proj }} |"
             echo "| Cached dump | ${{ steps.state.outputs.code }} |"
             echo "| decompiled.c | $(wc -c < decompiled.c 2>/dev/null | tr -d ' ' || echo 0) bytes |"
             echo "| Function bodies | $(grep -c '^{$' decompiled.c 2>/dev/null || echo 0) |"
@@ -209,6 +199,5 @@ jobs:
             symbols.json
             engine.txt
             r2.log
-            analyze.log
           retention-days: 30
           if-no-files-found: warn

@@ -4,10 +4,11 @@ set -uo pipefail
 BIN=${BIN:-binary}
 BUDGET=${BUDGET:-18000}
 PHASE=${PHASE:-all}
-PROJ=${R2PROJ:-r2proj}
 CODE=${CODE_OUT:-decompiled.c}
 ENG=${ENGINE_OUT:-engine.txt}
 LOG=${R2_LOG:-r2.log}
+RAW=${RAW_OUT:-r2.out}
+AFLJ=${AFLJ_OUT:-.aflj}
 R2=${R2BIN:-r2}
 STALL=${STALL:-600}
 
@@ -28,54 +29,13 @@ kill_at() {
   return $r
 }
 
-[ -s "$BIN" ] || { echo "[-] missing $BIN"; exit 1; }
-
-IMPORTS=${IMPORTS_OUT:-imports.json}
-SYMBOLS=${SYMBOLS_OUT:-symbols.json}
-
-AE=0
-if [ -f .ae ]; then AE=$(cat .ae); fi
-
-if [ "$PHASE" = all ] || [ "$PHASE" = analyze ]; then
-  if [ -f "$PROJ" ]; then
-    echo "project cached"
-  else
-    AM=$((BUDGET / 3))
-    S=$(date +%s)
-    kill_at "$AM" "$R2" "${O[@]}" -q -c aaa \
-      -c "Ps $PWD/$PROJ" "$BIN" > analyze.log 2>&1
-    AE=$(( $(date +%s) - S ))
-    echo "$AE" > .ae
-    echo "analyze ${AE}s"
-    if [ ! -f "$PROJ" ]; then
-      tail -20 analyze.log 2>/dev/null
-      echo "[-] project save failed"
-      exit 1
-    fi
-  fi
-fi
-[ "$PHASE" = analyze ] && exit 0
-
-AFLJ=""
-if [ -s "$PROJ" ] && command -v "$R2" >/dev/null 2>&1; then
-  kill_at "${AFLJ_BUDGET:-300}" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c aflj -c q "$BIN" > .aflj 2>> "$LOG" || true
-  [ -s .aflj ] && AFLJ=.aflj
-fi
-
-python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --aflj "$AFLJ" 2>> "$LOG" \
-  || { echo "[-] symbol export failed"; exit 1; }
-[ "$PHASE" = names ] && exit 0
-
-rm -f "$CODE" "$LOG" "$ENG"
-: > "$LOG"
-
 watch() {
-  local b=$1 out=$2 i=0 mb n last
+  local b=$1 i=0 mb n last
   while [ "$i" -lt "$b" ]; do
     sleep 60
     i=$((i + 60))
-    mb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1048576 ))
-    n=$(grep -c '^{$' "$out" 2>/dev/null || true)
+    mb=$(( $(wc -c < "$RAW" 2>/dev/null || echo 0) / 1048576 ))
+    n=$(grep -c '^{$' "$RAW" 2>/dev/null || true)
     if [ "$mb" -eq 0 ]; then
       last=$(tail -1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-140)
       echo "dump ${i}s 0MB r2: ${last:-silent}"
@@ -94,42 +54,76 @@ watch() {
   done
 }
 
-dump() {
-  local b=$1 c=$2 out=$3
-  echo "dump start $c budget ${b}s"
-  rm -f .stall
-  watch "$b" "$out" &
+session() {
+  local b=$1 cmd=$2
+  echo "session $cmd budget ${b}s"
+  rm -f .stall "$RAW"
+  watch "$b" &
   local w=$!
-  kill_at "$b" "$R2" "${O[@]}" -q -p "$PWD/$PROJ" -c "$c" "$BIN" > "$out" 2>> "$LOG"
+  if [ "$cmd" = names ]; then
+    kill_at "$b" "$R2" "${O[@]}" -q -c aaa -c '?e @@AFLJ@@' -c aflj "$BIN" > "$RAW" 2>> "$LOG"
+  else
+    kill_at "$b" "$R2" "${O[@]}" -q -c aaa -c '?e @@AFLJ@@' -c aflj \
+      -c '?e @@DUMP@@' -c "$cmd" "$BIN" > "$RAW" 2>> "$LOG"
+  fi
   local r=$?
   kill "$w" 2>/dev/null
-  if [ -f .stall ]; then
-    return 2
-  fi
+  [ -f .stall ] && return 2
   return $r
 }
 
-REST=$((BUDGET - AE))
-[ "$REST" -lt 300 ] && REST=300
-MAIN=$((REST * 4 / 5))
-FALL=$((REST - MAIN))
+split_raw() {
+  python3 - "$RAW" "$1" "$2" <<'PY'
+import sys
+
+raw = open(sys.argv[1], encoding='utf-8', errors='ignore').read()
+_head, _sep, rest = raw.partition('@@AFLJ@@')
+aflj, _mark, code = rest.partition('@@DUMP@@')
+open(sys.argv[3], 'w', encoding='utf-8').write(aflj.strip())
+open(sys.argv[2], 'w', encoding='utf-8').write(code)
+PY
+}
+
+[ -s "$BIN" ] || { echo "[-] missing $BIN"; exit 1; }
+
+IMPORTS=${IMPORTS_OUT:-imports.json}
+SYMBOLS=${SYMBOLS_OUT:-symbols.json}
+
+rm -f "$CODE" "$ENG" "$LOG" "$AFLJ" "$RAW"
+: > "$LOG"
 
 S=$(date +%s)
-dump "$MAIN" 'pdg @@f' "$CODE"
+session "$BUDGET" "$([ "$PHASE" = names ] && echo names || echo 'pdg @@f')"
 RP=$?
+
+if [ "$PHASE" = names ]; then
+  split_raw /dev/null "$AFLJ"
+  python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --aflj "$AFLJ" 2>> "$LOG" \
+    || { echo "[-] symbol export failed"; exit 1; }
+  exit 0
+fi
+
+split_raw "$CODE" "$AFLJ"
+python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --aflj "$AFLJ" 2>> "$LOG" \
+  || { echo "[-] symbol export failed"; exit 1; }
+
 NB=$(grep -c '^{$' "$CODE" 2>/dev/null || true)
 if [ "$RP" = 2 ] || [ "${NB:-0}" -eq 0 ]; then
   echo "[-] pdg produced no functions"
   tail -30 "$LOG" 2>/dev/null
   exit 1
 fi
+
 ENGINE=pdg
 RC=none
 MERGED=0
+FALL=$((BUDGET / 5))
+[ "$FALL" -lt 300 ] && FALL=300
 if [ "${NB:-0}" -lt 5 ]; then
   echo "pdg sparse -> pdc for the missing functions"
-  dump "$FALL" 'pdc @@f' "$CODE.pdc"
+  session "$FALL" 'pdc @@f'
   RC=$?
+  split_raw "$CODE.pdc" /dev/null
   COUNTS=$(python3 - "$CODE" "$CODE.pdc" <<'PY'
 import re, sys
 
@@ -221,8 +215,6 @@ PY
   echo "pdc_merged=$MERGED"
   echo "r2=${R2V:-?}"
   echo "budget=$BUDGET"
-  echo "analyze_s=$AE"
-  echo "pdg_budget_s=$MAIN"
   echo "pdc_budget_s=$FALL"
   echo "dump_s=$EL"
   echo "bin=$(basename "$BIN")"
