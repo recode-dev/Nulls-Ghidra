@@ -10,9 +10,9 @@ LOG=${R2_LOG:-r2.log}
 RAW=${RAW_OUT:-r2.out}
 AFLJ=${AFLJ_OUT:-.aflj}
 R2=${R2BIN:-r2}
-STALL=${STALL:-600}
+STALL=${STALL:-300}
 
-O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=false -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
+O=(-e scr.color=0 -e bin.relocs.apply=true -e r2ghidra.casts=true -e r2ghidra.linelen=200 -e r2ghidra.fixups=true)
 
 kill_at() {
   local b=$1
