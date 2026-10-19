@@ -30,6 +30,10 @@ def parse_args():
     p.add_argument('--top', type=int, default=5)
     p.add_argument('--band', type=float, default=6.0, help='max char size ratio')
     p.add_argument('--min-score', type=float, default=0.0)
+    p.add_argument('--ladder', action='store_true', help='walk callees from the anchor and bind them in turn')
+    p.add_argument('--depth', type=int, default=2)
+    p.add_argument('--accept', type=float, default=0.10, help='min gap to accept a ladder binding')
+    p.add_argument('--pairs', default='', help='write accepted old:new pairs as json')
     p.add_argument('--json', action='store_true')
     return p.parse_args()
 
@@ -363,6 +367,31 @@ def run_one(args, source, target, weights, df, token, anchor_pair):
     }
 
 
+def ladder(args, source, target, weights, df, anchor_pair):
+    bound = {f'0x{anchor_pair[0]:x}': f'0x{anchor_pair[1]:x}'}
+    queue = [(f'0x{anchor_pair[0]:x}', 0)]
+    accepted = []
+    while queue:
+        old_key, level = queue.pop(0)
+        if level >= args.depth:
+            continue
+        pair = (int(old_key, 16), int(bound[old_key], 16))
+        for callee in source.get(old_key, {}).get('calls') or []:
+            if callee in bound or callee not in source:
+                continue
+            result = run_one(args, source, target, weights, df, callee, pair)
+            if result.get('error') or not result['rows']:
+                continue
+            top = result['rows'][0]
+            if top['score'] < 0.45 or result['gap'] < args.accept:
+                continue
+            bound[callee] = top['key']
+            accepted.append({'old': callee, 'new': top['key'], 'score': top['score'],
+                             'gap': result['gap'], 'name': result['name']})
+            queue.append((callee, level + 1))
+    return accepted
+
+
 def main():
     args = parse_args()
     source, _source_base = prepare(args.source)
@@ -371,6 +400,17 @@ def main():
     candidates = [item for item in target.values() if item['size'] > 0]
     df, weights = df_weights(candidates)
     anchor_pair = parse_anchor(args.anchor)
+    if args.ladder:
+        if not anchor_pair:
+            raise SystemExit('[-] --ladder needs --anchor')
+        accepted = ladder(args, source, target, weights, df, anchor_pair)
+        if args.pairs:
+            with open(args.pairs, 'w', encoding='utf-8') as f:
+                json.dump({row['old']: row['new'] for row in accepted}, f, indent=1)
+        for row in accepted:
+            print(f"{row['old']} -> {row['new']}  {row['score']:.3f} gap={row['gap']:.3f}  {row['name'][:40]}")
+        print(f'[{len(accepted)} bindings]')
+        return
     tokens = jobs(args)
     if not tokens:
         raise SystemExit('[-] pass -o, -n or --batch')
