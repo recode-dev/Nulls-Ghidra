@@ -144,6 +144,15 @@ def arm_targets(blob, va):
     return out
 
 
+def aarch64_targets(blob, va):
+    out = set()
+    for pos in range(0, max(0, len(blob) - 3), 4):
+        word = struct.unpack_from('<I', blob, pos)[0]
+        if word & 0xFC000000 == 0x94000000:
+            out.add(va + pos + (sign(word & 0x3FFFFFF, 26) << 2))
+    return out
+
+
 def thumb_targets(blob, va):
     out = set()
     for pos in range(0, max(0, len(blob) - 3), 2):
@@ -165,11 +174,14 @@ def thumb_targets(blob, va):
 def binary_edges(path, start_va, length, index_base):
     with open(path, 'rb') as f:
         raw = f.read()
-    _start, _machine, binary_base, sections = load_image(raw)
+    _start, machine, binary_base, sections = load_image(raw)
     blob, va = read_body(raw, sections, start_va, min(length, MAX_BODY))
     if not blob:
         return set(), [], binary_base
-    found = arm_targets(blob, va) | thumb_targets(blob, va)
+    if machine & 0x1000000:
+        found = aarch64_targets(blob, va)
+    else:
+        found = arm_targets(blob, va) | thumb_targets(blob, va)
     rvas = set()
     for target in found:
         rvas.add(target - index_base if target >= index_base else target - binary_base)
@@ -197,10 +209,19 @@ def score(src, dst, weights, df):
         'bytes': ratio(src['bytes'], dst['bytes']),
     }
     parts['rare'] = sum(1 for value in src['consts'] & dst['consts'] if df.get(value, 999) <= 10)
-    total = (0.32 * parts['consts'] + 0.18 * parts['deltas'] + 0.12 * parts['fields']
-             + 0.16 * parts['form'] + 0.12 * parts['chars'] + 0.10 * parts['bytes'])
-    if not parts['rare']:
-        total -= 0.30 * parts['consts']
+    weights = {'consts': 0.32, 'deltas': 0.18, 'fields': 0.12, 'form': 0.16, 'chars': 0.12, 'bytes': 0.10}
+    active = set()
+    if src['consts'] or dst['consts']:
+        active.add('consts')
+    if src['fields'] or dst['fields']:
+        active.update(('deltas', 'fields'))
+    if src['loops'] or src['branches'] or dst['loops'] or dst['branches']:
+        active.add('form')
+    if src['size'] and dst['size']:
+        active.add('chars')
+    if src['bytes'] and dst['bytes']:
+        active.add('bytes')
+    total = sum(weights[k] * parts[k] for k in active) / sum(weights[k] for k in active) if active else 0.0
     if src['bytes'] and src['bytes'] == dst['bytes']:
         total += 0.05
     return max(0.0, min(1.0, total)), parts
@@ -311,7 +332,14 @@ def run_one(args, source, target, weights, df, token, anchor_pair):
     rows = [row for row in candidates if row[0] >= args.min_score][:max(1, args.top)]
     best = rows[0][0] if rows else 0.0
     second = rows[1][0] if len(rows) > 1 else 0.0
-    verdict = 'strong' if best >= 0.62 and best - second >= 0.08 else 'weak' if best >= 0.5 else 'none'
+    gap = best - second
+    top_edges = bool(rows) and bool(rows[0][3])
+    if gap >= 0.08 and (best >= 0.55 or top_edges):
+        verdict = 'strong'
+    elif gap >= 0.05:
+        verdict = 'weak'
+    else:
+        verdict = 'none'
     return {
         'input': token,
         'old': key,
