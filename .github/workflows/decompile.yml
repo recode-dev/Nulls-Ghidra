@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: Google Drive link to the game binary
-        default: ''
+        description: Google Drive link to the game binary, empty uses the built-in default
+        default: 'https://drive.google.com/file/d/1rGbGCTWo4sevN5zTxUl_Ik1SeiIHBM7K/view?usp=drivesdk'
       seconds:
         description: total analysis budget in seconds
         default: '18000'
@@ -32,7 +32,7 @@ jobs:
 
       - id: uh
         run: |
-          U="${{ inputs.url || vars.BINARY_URL }}"
+          U="${{ inputs.url || vars.BINARY_URL || 'https://drive.google.com/file/d/1rGbGCTWo4sevN5zTxUl_Ik1SeiIHBM7K/view?usp=drivesdk' }}"
           H=$(echo -n "$U" | shasum -a 256 | awk '{print $1}')
           echo "URL_HASH=$H" >> "$GITHUB_OUTPUT"
 
@@ -43,7 +43,7 @@ jobs:
 
       - id: g
         env:
-          BINARY_URL: ${{ inputs.url || vars.BINARY_URL }}
+          BINARY_URL: ${{ inputs.url || vars.BINARY_URL || 'https://drive.google.com/file/d/1rGbGCTWo4sevN5zTxUl_Ik1SeiIHBM7K/view?usp=drivesdk' }}
           EXPECT_FORMAT: ${{ inputs.format || 'auto' }}
         run: bash tools/fetch.sh
 

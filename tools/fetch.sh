@@ -5,7 +5,7 @@ URL=${BINARY_URL:-}
 OUT=${OUT_BIN:-binary}
 CACHE=${BIN_CACHE_DIR:-bin_cache}
 
-[ -n "$URL" ] || { echo "[-] BINARY_URL is empty"; exit 1; }
+[ -n "$URL" ] || { echo "[-] BINARY_URL is empty: fill the url input or set the BINARY_URL repository variable"; exit 1; }
 
 is_html() {
   head -c 1024 "$1" | grep -qi '<!doctype html\|<html'
