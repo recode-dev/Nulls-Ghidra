@@ -203,10 +203,12 @@ jobs:
       - run: |
           python3 - <<'PY'
           import json
-          functions = len(json.load(open('index_data/functions.json')))
+          rows = json.load(open('index_data/functions.json'))
+          parsed = sum(1 for value in rows.values() if value.get('size_chars'))
           vtables = len(json.load(open('index_data/vtables.json')))
-          assert functions > 1000 and vtables > 0, (functions, vtables)
-          print(f'index ok: {functions} functions, {vtables} vtables')
+          strings = len(json.load(open('index_data/strings.json')))
+          assert parsed > 1000 and vtables > 0 and strings > 0, (len(rows), parsed, vtables, strings)
+          print(f'index ok: {len(rows)} functions, {parsed} parsed, {vtables} vtables, {strings} strings')
           PY
 
       - if: always()

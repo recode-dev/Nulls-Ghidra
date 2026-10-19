@@ -7,8 +7,8 @@ import re
 import struct
 import sys
 
-from binary import (BadImage, chained_slots, classic_slots, load_commands, macho_image,
-                    resolve_stubs, u32, u64, uleb)
+from binary import (BadImage, chained_slots, classic_slots, is_elf, load_commands, load_image,
+                    macho_image, resolve_stubs, u32, u64, uleb)
 
 DYLIB_COMMANDS = (0xc, 0xd, 0x80000018, 0x8000001f)
 LC_SYMTAB = 0x2
@@ -135,10 +135,141 @@ def imports(data, start, base, sections):
     return grouped
 
 
+def elf_symbol_tables(data, sections):
+    is32 = data[4] == 1
+    entry_size = 16 if is32 else 24
+    tables = {}
+    for section in sections:
+        label = section.get('raw')
+        if label not in ('.dynsym', '.symtab') or not section['size']:
+            continue
+        strings = next((s for s in sections if s.get('raw') == ('.dynstr' if label == '.dynsym' else '.strtab')), None)
+        if strings is None:
+            continue
+        blob = data[section['fileoff']:section['fileoff'] + section['size']]
+        pool = data[strings['fileoff']:strings['fileoff'] + strings['size']]
+        rows = []
+        for index in range(len(blob) // entry_size):
+            pos = index * entry_size
+            if is32:
+                name_off, value, _size, info, _other, shndx = struct.unpack_from('<IIIBBH', blob, pos)
+                kind = info & 0xF
+            else:
+                name_off, info, _other, shndx, value, _size = struct.unpack_from('<IBBHQQ', blob, pos)
+                kind = info & 0xF
+            name = cstring(pool, name_off) if name_off < len(pool) else ''
+            rows.append({'name': name, 'value': value, 'shndx': shndx,
+                         'bind': (info >> 4) & 0xF, 'type': kind})
+        tables[label] = rows
+    return tables
+
+
+def elf_relocation_slots(data, sections, dynamic):
+    is32 = data[4] == 1
+    slots = {}
+    for section in sections:
+        if section.get('raw') not in ('.rel.dyn', '.rel.plt', '.rela.dyn', '.rela.plt') or not section['size']:
+            continue
+        rela = 'rela' in section['raw']
+        entry_size = (12 if is32 else 24) if rela else (8 if is32 else 16)
+        for index in range(section['size'] // entry_size):
+            pos = section['fileoff'] + index * entry_size
+            if pos + entry_size > len(data):
+                break
+            if is32:
+                offset, info = struct.unpack_from('<II', data, pos)
+                sym = info >> 8
+            else:
+                offset, info = struct.unpack_from('<QQ', data, pos)
+                sym = info >> 32
+            if sym and sym < len(dynamic):
+                name = dynamic[sym]['name']
+                if name:
+                    slots.setdefault(name, []).append(offset)
+    return slots
+
+
+def elf_main(args, data):
+    _start, _machine, _base, sections = load_image(data)
+    tables = elf_symbol_tables(data, sections)
+    dynamic = tables.get('.dynsym', [])
+    slots = elf_relocation_slots(data, sections, dynamic)
+
+    defined = {}
+    exported = {}
+    undefined = {}
+    for label in ('.symtab', '.dynsym'):
+        for row in tables.get(label, []):
+            name = row['name']
+            if not name or name.startswith('$') or row['type'] in (3, 4) or row['shndx'] >= 0xFFF1:
+                continue
+            if row['shndx'] == 0:
+                undefined.setdefault(name, 0)
+            elif row['value']:
+                defined.setdefault(name, row['value'])
+                if row['bind'] == 1 and row['type'] in (1, 2):
+                    exported.setdefault(name, row['value'])
+
+    imported = {}
+    for name, hit in slots.items():
+        if name in undefined:
+            imported[name] = {'slots': hit, 'stubs': []}
+
+    libraries = []
+    dynstr = next((s for s in sections if s.get('raw') == '.dynstr'), None)
+    dynamic_section = next((s for s in sections if s.get('raw') == '.dynamic'), None)
+    if dynstr and dynamic_section:
+        pool = data[dynstr['fileoff']:dynstr['fileoff'] + dynstr['size']]
+        for pos in range(dynamic_section['fileoff'], dynamic_section['fileoff'] + dynamic_section['size'] - 7, 8):
+            tag, value = struct.unpack_from('<iI', data, pos)
+            if tag == 0:
+                break
+            if tag == 1:
+                libraries.append(cstring(pool, value))
+
+    mapping = {}
+    for name, address in exported.items():
+        mapping.setdefault(name, address)
+    for name, address in defined.items():
+        mapping.setdefault(name, address)
+    for name, item in imported.items():
+        if item['slots']:
+            mapping.setdefault(name, item['slots'][0])
+    if args.extra and os.path.exists(args.extra):
+        with open(args.extra, 'r', encoding='utf-8') as f:
+            mapping.update({k: v for k, v in json.load(f).items() if isinstance(v, int)})
+
+    if args.names:
+        allowed = re.compile(r'[A-Za-z_][A-Za-z0-9_.]{0,180}')
+        with open(args.names, 'w', encoding='utf-8') as f:
+            for name, address in mapping.items():
+                if allowed.fullmatch(name):
+                    f.write(f'{name}\t0x{address:x}\n')
+
+    payload = {
+        'dylibs': libraries,
+        'imports': {name: {'slots': [f'0x{a:x}' for a in item['slots']],
+                           'stubs': []} for name, item in sorted(imported.items())},
+        'exports': {name: f'0x{a:x}' for name, a in sorted(exported.items())},
+        'symbols': {name: f'0x{a:x}' for name, a in sorted(defined.items())},
+        'unbound': sorted(name for name in undefined if name not in imported),
+    }
+    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+    with open(args.out, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False)
+    if args.map:
+        with open(args.map, 'w', encoding='utf-8') as f:
+            json.dump(mapping, f, ensure_ascii=False)
+    print(f'[+] dylibs={len(libraries)} imports={len(imported)} exports={len(exported)} '
+          f'symbols={len(defined)} unbound={len(payload["unbound"])} -> {args.out}')
+
+
 def main():
     args = parse_args()
     with open(args.bin, 'rb') as f:
         data = f.read()
+    if is_elf(data):
+        return elf_main(args, data)
     start, _cputype, base, sections = macho_image(data)
 
     libraries = dylibs(data, start)

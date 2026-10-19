@@ -7,7 +7,7 @@ import json
 import os
 import re
 
-from xrefs import FUNC_RE
+from xrefs import find_functions
 
 TYPED_RE = re.compile(
     r'\*\s*\(\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*)\s*\*\s*\)\s*'
@@ -56,14 +56,7 @@ def main():
     with open(args.code, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
-    functions = []
-    for match in FUNC_RE.finditer(text):
-        if not match.group(3):
-            continue
-        try:
-            functions.append((match.start(), int(match.group(3), 16)))
-        except ValueError:
-            continue
+    functions = [(item['start'], item['address']) for item in find_functions(text)]
     positions = [p for p, _ in functions]
     base = (functions[0][1] >> 32) << 32 if functions else 0
 

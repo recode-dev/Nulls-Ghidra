@@ -5,6 +5,8 @@ import os
 import re
 import argparse
 
+from xrefs import find_functions
+
 def parse_args():
     p = argparse.ArgumentParser(description="AST Fingerprint and Topology Classifier")
     p.add_argument('--code', required=True, help='Path to decompiled.c')
@@ -20,9 +22,8 @@ def main():
     with open(args.code, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
-    fn_pattern = re.compile(r'\n([a-zA-Z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{', re.MULTILINE)
-    matches = list(fn_pattern.finditer(text))
-    first = int(matches[0].group(3), 16) if matches else 0
+    matches = find_functions(text)
+    first = matches[0]['address'] if matches else 0
     base = args.base or ((first >> 32) << 32 if first >= 0x100000000 else 0)
 
     field_re = re.compile(r'\b(?:arg\w*|this|p\w*Var\d+|iVar\d+|uVar\d+|pvVar\d+|puVar\d+)\s*(?:\+\s*|\-\>\s*|\.\s*|\[\s*)(0x[0-9a-fA-F]+|\d+)')
@@ -38,18 +39,13 @@ def main():
 
     fingerprints = {}
 
-    for i in range(len(matches)):
-        m = matches[i]
-        if not m.group(3):
-            continue
-        addr_hex = m.group(3)
-        addr_value = int(addr_hex, 16)
+    for item in matches:
+        addr_value = item['address']
+        addr_hex = f'{addr_value:x}'
         offset = addr_value - base if addr_value >= base else addr_value
         off_str = f"0x{offset:x}"
 
-        start_pos = m.start()
-        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[start_pos:end_pos]
+        body = item['body']
 
         ret_fld_m = ret_field_re.search(body)
         ret_field = ret_fld_m.group(2) if ret_fld_m else None
@@ -67,7 +63,7 @@ def main():
 
         fingerprints[off_str] = {
             "offset": off_str,
-            "return_type": m.group(1).strip(),
+            "return_type": item['ret'].strip(),
             "size": len(body),
             "lines": len(body.splitlines()),
             "ret_field": ret_field,

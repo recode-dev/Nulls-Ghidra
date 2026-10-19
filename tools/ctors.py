@@ -58,12 +58,61 @@ def add_offset(word, reg):
     return ((word >> 10) & 0xFFF) << (12 * shift)
 
 
-def decode_code_pointer(value, base, starts):
+def decode_code_pointer(value, base, starts, width=8):
+    if width == 4:
+        return value - base in starts
     for mask in PTR_MASKS:
         rva = (value & mask) - base
         if rva in starts:
             return True
     return False
+
+
+def arm32_refs(words, start, data, sections, data_sections):
+    refs = {}
+    for i, word in enumerate(words):
+        if (word & 0x0C000000) != 0x04000000 or (word >> 25) & 1:
+            continue
+        if not ((word >> 24) & 1) or not ((word >> 20) & 1) or ((word >> 16) & 0xF) != 15:
+            continue
+        imm = word & 0xFFF
+        literal = start + i * 4 + 8
+        literal += imm if (word >> 23) & 1 else -imm
+        position = file_offset(sections, literal)
+        if position is None or position + 4 > len(data):
+            continue
+        address = struct.unpack_from('<I', data, position)[0]
+        register = word & 0xF
+        target = address
+        for following in words[i + 1:i + 5]:
+            if ((following >> 16) & 0xF) != register:
+                continue
+            if ((following & 0x0C000000) == 0x04000000 and (following >> 25) & 1 == 0
+                    and (following >> 20) & 1 == 1):
+                inner = file_offset(sections, address)
+                if inner is not None and inner + 4 <= len(data):
+                    loaded = struct.unpack_from('<I', data, inner)[0]
+                    if any(s['addr'] <= loaded < s['addr'] + s['size'] for s in sections):
+                        target = loaded
+            break
+        address = target
+        section = next((s for s in data_sections if s['addr'] <= address < s['addr'] + s['size']), None)
+        if section is None:
+            continue
+        entry = refs.setdefault(address, {'section': f"{section['seg']}.{section['sect']}",
+                                          'store': 0, 'load': 0, 'addr': 0, 'access': 0,
+                                          'funcs': set(), 'sites': []})
+        entry['addr'] += 1
+        entry['sites'].append(start + i * 4)
+        for following in words[i + 1:i + 7]:
+            if ((following >> 16) & 0xF) != register:
+                continue
+            store = ((following & 0x0C000000) == 0x04000000 and (following >> 25) & 1 == 0
+                     and (following >> 20) & 1 == 0)
+            entry['store' if store else 'access'] += 1
+            break
+        entry['funcs'].add(start + i * 4)
+    return refs
 
 
 def main():
@@ -90,7 +139,12 @@ def main():
     words.frombytes(data[text['fileoff']:text['fileoff'] + text['size']])
     start = text['addr']
 
-    refs = {}
+    width = 4 if data[:4] == b'\x7fELF' and data[4] == 1 else 8
+    if width == 4:
+        refs = arm32_refs(words, start, data, sections, data_sections)
+        words = []
+    else:
+        refs = {}
     for i in range(len(words) - 1):
         page = adrp_target(words[i], start + i * 4)
         if page is None:
@@ -146,10 +200,12 @@ def main():
     tables = 0
     for address, entry in refs.items():
         slots = 0
-        position = file_offset(sections, address)
-        while position is not None and slots < MAX_TABLE and position + slots * 8 + 8 <= len(data):
-            value = struct.unpack_from('<Q', data, position + slots * 8)[0]
-            if not decode_code_pointer(value, base, starts_set):
+        table = next((value for value in (address, address + width * 2) if value in vtable_set), None)
+        position = file_offset(sections, table if table is not None else address)
+        reader = '<I' if width == 4 else '<Q'
+        while position is not None and slots < MAX_TABLE and position + (slots + 1) * width <= len(data):
+            value = struct.unpack_from(reader, data, position + slots * width)[0]
+            if not decode_code_pointer(value, base, starts_set, width):
                 break
             slots += 1
         owners = set()
@@ -173,8 +229,8 @@ def main():
             tables += 1
         if entry['store'] and slots:
             record['vptr_candidate'] = True
-        if address in vtable_set:
-            record['vtable'] = f'0x{address:x}'
+        if table is not None:
+            record['vtable'] = f'0x{table:x}'
             linked += 1
         export[f'0x{address:x}'] = record
 

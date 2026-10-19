@@ -8,7 +8,7 @@ import struct
 from binary import BadImage, file_offset, macho_image
 
 DATA_SECTIONS = ('__const', '__data', '__objc_const', '__objc_data',
-                 '__mod_init_func', '__init_offsets')
+                 '__mod_init_func', '__init_offsets', '.init_array', '.preinit_array')
 PTR_MASKS = ((1 << 36) - 1, (1 << 43) - 1, (1 << 48) - 1)
 MAX_SLOTS = 1024
 
@@ -29,16 +29,14 @@ def load(path, default):
         return json.load(f)
 
 
-def decode_slot(value, base, starts, code_range=None):
+def decode_slot(value, base, starts, width=8):
+    if width == 4:
+        rva = value - base
+        return rva if rva in starts else None
     for mask in PTR_MASKS:
         rva = (value & mask) - base
         if rva in starts:
             return rva
-    if code_range:
-        for mask in PTR_MASKS:
-            rva = (value & mask) - base
-            if code_range[0] <= rva < code_range[1]:
-                return rva
     return None
 
 
@@ -46,53 +44,101 @@ def data_sections(sections):
     return [s for s in sections if s['sect'] in DATA_SECTIONS and s['size'] and s['fileoff']]
 
 
-def scan_section(data, section, base, starts, min_slots, code_range=None, max_gap=2, ranges=()):
+def scan_section(data, section, base, starts, min_slots, width=8):
     lo = section['addr']
     hi = lo + section['size']
+    reader = '<I' if width == 4 else '<Q'
     tables = {}
     run = []
     start = 0
-    gap = 0
     pos = lo
-    while pos + 8 <= hi:
+    while pos + width <= hi:
         fileoff = section['fileoff'] + (pos - lo)
-        if fileoff + 8 > len(data):
+        if fileoff + width > len(data):
             break
-        value = struct.unpack_from('<Q', data, fileoff)[0]
-        rva = decode_slot(value, base, starts)
-        loose = False
-        if rva is None and code_range:
-            for mask in PTR_MASKS:
-                candidate = (value & mask) - base
-                if code_range[0] <= candidate < code_range[1]:
-                    rva = candidate
-                    loose = True
-                    break
-        boundary = False
-        if loose and pos - 16 >= lo:
-            head = section['fileoff'] + pos - 16 - lo
-            top = struct.unpack_from('<i', data, head)[0]
-            info = struct.unpack_from('<Q', data, head + 8)[0]
-            boundary = -0x10000 < top <= 0 and (info == 0 or any(lo2 <= info < hi2 for lo2, hi2 in ranges))
-        if boundary:
-            if len(run) >= min_slots:
-                tables[start] = run
-            run = []
-            gap = 0
-        elif rva is not None and len(run) < MAX_SLOTS and (not loose or (run and gap < max_gap)):
+        value = struct.unpack_from(reader, data, fileoff)[0]
+        rva = decode_slot(value, base, starts, width)
+        if rva is not None and len(run) < MAX_SLOTS:
             if not run:
                 start = pos
             run.append(rva)
-            gap = gap + 1 if loose else 0
         else:
             if len(run) >= min_slots:
                 tables[start] = run
             run = []
-            gap = 0
-        pos += 8
+        pos += width
     if len(run) >= min_slots:
         tables[start] = run
     return tables
+
+
+def demangle(mangled):
+    text = mangled
+    if text.startswith('_ZTV') or text.startswith('_ZTI'):
+        text = text[4:]
+    if text.startswith('N'):
+        text = text[1:]
+    parts = []
+    index = 0
+    while index < len(text) and text[index].isdigit():
+        end = index
+        while end < len(text) and text[end].isdigit():
+            end += 1
+        length = int(text[index:end])
+        part = text[end:end + length]
+        if not part:
+            break
+        parts.append(part)
+        index = end + length
+    return '::'.join(parts)
+
+
+def symbol_vtables(data, symbols, base, width, fingerprints, code_range, sections):
+    named = {name: int(value, 16) for name, value in (symbols.get('symbols') or {}).items()}
+    types = {address: name for name, address in named.items() if name.startswith('_ZTI')}
+    reader = '<I' if width == 4 else '<Q'
+    out = {}
+    for name, address in named.items():
+        if not name.startswith('_ZTV') or address <= 0:
+            continue
+        pos = file_offset(sections, address)
+        if pos is None or pos + width * 2 > len(data):
+            continue
+        start = address + width * 2
+        methods = []
+        cursor = pos + width * 2
+        while cursor + width <= len(data) and len(methods) < MAX_SLOTS:
+            value = struct.unpack_from(reader, data, cursor)[0]
+            rva = value - base
+            if width == 4 and rva & 1:
+                rva &= ~1
+            if not (code_range[0] <= rva < code_range[1]):
+                break
+            methods.append(rva)
+            cursor += width
+        if len(methods) < 2:
+            continue
+        typeinfo = struct.unpack_from(reader, data, pos + width)[0]
+        entry = {
+            'address': f'0x{start:x}',
+            'section': '__const',
+            'kind': 'vtable',
+            'slots': len(methods),
+            'methods': [f'0x{m:x}' for m in methods],
+            'chars': sum(fingerprints.get(f'0x{m:x}', {}).get('size', 0) for m in methods),
+            'bytes': len(methods) * width,
+            'header': {'offset_to_top': struct.unpack_from('<i', data, pos)[0],
+                       'typeinfo': f'0x{typeinfo:x}' if typeinfo else None},
+        }
+        class_name = demangle(types.get(typeinfo, name))
+        if class_name:
+            entry['header']['class_name'] = class_name
+            entry['header']['typeinfo_name'] = types.get(typeinfo, name).lstrip('_')
+        roles = roles_of(fingerprints, methods)
+        if any(roles):
+            entry['roles'] = roles
+        out[start] = entry
+    return out
 
 
 def roles_of(fingerprints, methods):
@@ -138,12 +184,12 @@ def mark_prefixes(vtables):
                 break
 
 
-def header_of(data, address, data_ranges, segments):
+def header_of(data, address, data_ranges, segments, width=8):
     offset = file_offset(segments, address)
-    if offset is None or offset < 16:
+    if offset is None or offset < width * 2:
         return None
-    offset_to_top = struct.unpack_from('<i', data, offset - 16)[0]
-    typeinfo = struct.unpack_from('<Q', data, offset - 8)[0]
+    offset_to_top = struct.unpack_from('<i', data, offset - width * 2)[0]
+    typeinfo = struct.unpack_from('<Q' if width == 8 else '<I', data, offset - width)[0]
     info_ok = typeinfo == 0 or any(lo <= typeinfo < hi for lo, hi in data_ranges)
     if not (info_ok and -0x10000 < offset_to_top <= 0):
         return None
@@ -153,9 +199,9 @@ def header_of(data, address, data_ranges, segments):
         name_ptr = 0
         holder = next((s for s in segments if s['addr'] <= typeinfo < s['addr'] + s['size']), None)
         if holder:
-            position = holder['fileoff'] + typeinfo - holder['addr'] + 8
-            if 0 <= position <= len(data) - 8:
-                name_ptr = struct.unpack_from('<Q', data, position)[0]
+            position = holder['fileoff'] + typeinfo - holder['addr'] + width
+            if 0 <= position <= len(data) - width:
+                name_ptr = struct.unpack_from('<Q' if width == 8 else '<I', data, position)[0]
         section = next((s for s in segments if s['addr'] <= name_ptr < s['addr'] + s['size']), None) \
             if name_ptr else None
         if section:
@@ -203,12 +249,11 @@ def main():
 
     with open(args.bin, 'rb') as f:
         data = f.read()
+    width = 4 if data[:4] == b'\x7fELF' and data[4] == 1 else 8
     _start, _cputype, base, segments = macho_image(data)
     sections = data_sections(segments)
     data_ranges = [(section['addr'], section['addr'] + section['size']) for section in segments]
     function_keys = {f'0x{v["offset"]:x}' for v in functions.values()}
-    text = next((s for s in segments if s['sect'] == '__text'), None)
-    code_range = (text['addr'] - base, text['addr'] - base + text['size']) if text else None
     vtables = {}
     inits = {}
     for section in sections:
@@ -229,9 +274,9 @@ def main():
                     'bytes': len(targets) * 4,
                 }
             continue
-        is_init = section['sect'] == '__mod_init_func'
+        is_init = section['sect'] in ('__mod_init_func', '.init_array', '.preinit_array')
         for address, methods in scan_section(data, section, base, starts_set, args.min_slots,
-                                             code_range, 2, data_ranges).items():
+                                             width).items():
             roles = roles_of(fingerprints, methods)
             entry = {
                 'address': f'0x{address:x}',
@@ -240,17 +285,23 @@ def main():
                 'slots': len(methods),
                 'methods': [f'0x{m:x}' for m in methods],
                 'chars': sum(functions.get(f'0x{m:x}', {}).get('size_chars', 0) for m in methods),
-                'bytes': len(methods) * 8,
+                'bytes': len(methods) * width,
             }
             if any(roles):
                 entry['roles'] = roles
             shadow = [i for i, m in enumerate(methods) if f'0x{m:x}' not in function_keys]
             if shadow:
                 entry['shadow'] = shadow
-            header = header_of(data, address, data_ranges, segments)
+            header = header_of(data, address, data_ranges, segments, width)
             if header:
                 entry['header'] = header
             (inits if is_init else vtables)[address] = entry
+
+    symbols = load(os.path.join(args.index_dir, 'symbols.json'), {})
+    if any(name.startswith('_ZTV') for name in (symbols.get('symbols') or {})):
+        text = next((s for s in segments if s['sect'] == '__text'), None)
+        code_range = (text['addr'] - base, text['addr'] - base + text['size']) if text else (0, len(data))
+        vtables = symbol_vtables(data, symbols, base, width, fingerprints, code_range, segments)
 
     mark_aliases(vtables)
     mark_prefixes(vtables)

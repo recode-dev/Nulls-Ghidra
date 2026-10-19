@@ -53,14 +53,8 @@ else
   python3 "$SCRIPTS/thin.py" "$BIN" "$THIN" || { echo "[-] thin failed"; exit 1; }
 fi
 
-if [ "$FORMAT" = macho ]; then
-  python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --names "$NAMES" 2>> "$LOG" \
-    || { echo "[-] symbol export failed"; exit 1; }
-else
-  echo '{}' > "$SYMBOLS"
-  echo '{}' > "$IMPORTS"
-  : > "$NAMES"
-fi
+python3 tools/imports.py --bin "$BIN" --out "$SYMBOLS" --map "$IMPORTS" --names "$NAMES" 2>> "$LOG" \
+  || { echo "[-] symbol export failed"; exit 1; }
 
 [ "$PHASE" = names ] && exit 0
 

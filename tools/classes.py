@@ -90,8 +90,12 @@ def main():
         raise SystemExit(f'[-] {os.path.join(args.index_dir, "vtables.json")} not found')
     fields = load(os.path.join(args.index_dir, 'fields.json'), {}).get('fields', {})
     ctors = load(os.path.join(args.index_dir, 'ctors.json'), {})
-    constructors = {address: entry.get('funcs') or []
-                    for address, entry in ctors.items() if entry.get('store')}
+    constructors = {}
+    for address, entry in ctors.items():
+        if not entry.get('store'):
+            continue
+        key = entry.get('vtable') or address
+        constructors.setdefault(key, []).extend(entry.get('funcs') or [])
 
     grouped = {}
     for address, table in vtables.items():

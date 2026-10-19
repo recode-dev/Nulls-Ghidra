@@ -17,6 +17,10 @@ from elf import elf_relocations
 FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
 )
+MARKER_RE = re.compile(
+    r'^//[ \t]*(\S+)[ \t]+0x([0-9a-fA-F]+)[ \t]+size[ \t]+0x([0-9a-fA-F]+)[ \t]*$', re.M
+)
+CONV_RE = re.compile(r'\b__\w*call\b|\b__noreturn\b')
 CALL_RE = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
 GENERIC_FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+?)\s+([A-Za-z_$][A-Za-z0-9_.$:~]*)\s*\(([^)]*)\)\s*\n?\s*\{'
@@ -40,7 +44,8 @@ GOTO_RE = re.compile(r'\bgoto\b')
 SWITCH_RE = re.compile(r'\bswitch\s*\(')
 LOOP_RE = re.compile(r'\b(while|for|do)\b')
 CODE_MARKERS = (';', '{', '}', 'fcn.', 'Var', '\\n', '\\x')
-STRING_SECTIONS = ('__cstring', '__objc_methname', '__objc_classname', '__objc_methtype')
+STRING_SECTIONS = ('__cstring', '__objc_methname', '__objc_classname', '__objc_methtype',
+                   '.rodata', '.dynstr', '.data.rel.ro', '.data.rel.ro.local')
 
 
 def parse_args():
@@ -61,7 +66,10 @@ def parse_args():
 def bin_strings(data, sections, min_len):
     out = {}
     for section in sections:
-        if section['sect'] not in STRING_SECTIONS or not section['size']:
+        label = section.get('raw') or section['sect']
+        if section['sect'] not in STRING_SECTIONS and label not in STRING_SECTIONS:
+            continue
+        if not section['size']:
             continue
         blob = data[section['fileoff']:section['fileoff'] + section['size']]
         pos = 0
@@ -314,10 +322,40 @@ def section_of(sections, address):
     return None
 
 
-def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
-               prologue_starts=None, name_map=None):
-    with open(code_path, 'r', encoding='utf-8', errors='ignore') as f:
-        text = f.read()
+def parse_decl(chunk):
+    head = chunk.split('{', 1)[0]
+    head = re.sub(r'/\*.*?\*/', ' ', head, flags=re.S)
+    open_paren = head.rfind('(')
+    close = head.rfind(')')
+    if open_paren < 0 or close < open_paren:
+        return '', ''
+    args = ' '.join(head[open_paren + 1:close].split())
+    prefix = head[:open_paren].strip()
+    match = re.search(r'([A-Za-z_$][A-Za-z0-9_.$:~=\[\]]*)$', prefix)
+    if not match:
+        return '', args
+    ret = CONV_RE.sub(' ', prefix[:match.start()]).strip()
+    return ' '.join(ret.split()), args
+
+
+def find_functions(text, name_map=None):
+    markers = list(MARKER_RE.finditer(text))
+    if markers:
+        out = []
+        for index, marker in enumerate(markers):
+            end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+            body = text[marker.end():end]
+            ret, args = parse_decl(body)
+            out.append({
+                'start': marker.start(),
+                'name': marker.group(1).strip(),
+                'address': int(marker.group(2), 16),
+                'size': int(marker.group(3), 16),
+                'ret': ret,
+                'args': args,
+                'body': body,
+            })
+        return out
 
     name_map = name_map or {}
     found = [(m.start(), m.group(1), m.group(2), m.group(3), m.group(4))
@@ -327,21 +365,42 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             if m.group(2) in name_map:
                 found.append((m.start(), m.group(1), m.group(2), None, m.group(3)))
     found.sort(key=lambda item: item[0])
-    matches = [item[0] for item in found]
-    functions = {}
-    strings_xref = {}
-    data_refs = {}
-
-    for i, (start, ret_type, name, hexaddr, argstr) in enumerate(found):
+    out = []
+    for index, (start, ret_type, name, hexaddr, argstr) in enumerate(found):
         if hexaddr:
             address = int(hexaddr, 16)
         else:
             address = name_map.get(name)
             if address is None:
                 continue
+        end = found[index + 1][0] if index + 1 < len(found) else len(text)
+        out.append({'start': start, 'name': name, 'address': address, 'size': None,
+                    'ret': ret_type.strip(), 'args': argstr, 'body': text[start:end]})
+    return out
+
+
+def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
+               prologue_starts=None, name_map=None):
+    with open(code_path, 'r', encoding='utf-8', errors='ignore') as f:
+        text = f.read()
+
+    name_map = name_map or {}
+    found = find_functions(text, name_map)
+    functions = {}
+    strings_xref = {}
+    data_refs = {}
+    line_starts = [m.start() for m in re.finditer('\n', text)]
+    call_names = {item['name']: item['address'] for item in found}
+    call_names.update(name_map or {})
+
+    for entry in found:
+        start = entry['start']
+        ret_type = entry['ret']
+        name = entry['name']
+        address = entry['address']
+        argstr = entry['args']
+        body = entry['body']
         rva = address - base if address >= base else address
-        end = matches[i + 1] if i + 1 < len(matches) else len(text)
-        body = text[start:end]
 
         strings = []
         for s in STR_RE.findall(body):
@@ -353,9 +412,9 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             target = int(c, 16)
             target = target - base if target >= base else target
             call_sites[target] = call_sites.get(target, 0) + 1
-        if name_map:
+        if call_names:
             for token in NAME_CALL_RE.findall(body[body.find('{'):]):
-                target = name_map.get(token)
+                target = call_names.get(token)
                 if target is None:
                     continue
                 target = target - base if target >= base else target
@@ -405,7 +464,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             'branches': len(IF_RE.findall(body)) + len(CASE_RE.findall(body)) + len(GOTO_RE.findall(body)),
             'switches': len(SWITCH_RE.findall(body)),
             'hash': hashlib.md5(body.encode('utf-8', 'ignore')).hexdigest()[:16],
-            'line': text.count('\n', 0, start) + 2,
+            'line': bisect.bisect_right(line_starts, start) + 2,
             'strings': strings,
             'calls': [f'0x{t:x}' for t in sorted(call_sites)],
             'call_sites': {f'0x{t:x}': n for t, n in sorted(call_sites.items())},
