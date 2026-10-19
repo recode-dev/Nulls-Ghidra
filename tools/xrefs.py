@@ -392,15 +392,32 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
     data_refs = {}
     line_starts = [m.start() for m in re.finditer('\n', text)]
     call_names = {}
+    ambiguous = set()
+
+    def add_alias(label, address):
+        # A short alias such as `update` is shared by dozens of classes.  First write
+        # won used to pin it to one arbitrary address, which silently attached calls to
+        # the wrong function.  A key that resolves to more than one address is dropped
+        # and only the fully qualified `Class::method` name is kept.
+        if label in ambiguous:
+            return
+        known = call_names.get(label)
+        if known is None:
+            call_names[label] = address
+        elif known != address:
+            del call_names[label]
+            ambiguous.add(label)
+
     for item in found:
         label = item['name']
-        call_names.setdefault(label, item['address'])
-        short = label.split('::')[-1]
-        call_names.setdefault(short, item['address'])
+        add_alias(label, item['address'])
+        add_alias(label.split('::')[-1], item['address'])
         if '::' not in label and not label.startswith('~'):
-            call_names.setdefault(f'{label}::{label}', item['address'])
-            call_names.setdefault(f'~{label}', item['address'])
-    call_names.update(name_map or {})
+            add_alias(f'{label}::{label}', item['address'])
+            add_alias(f'~{label}', item['address'])
+    for label, address in (name_map or {}).items():
+        ambiguous.discard(label)
+        call_names[label] = address
 
     for entry in found:
         start = entry['start']

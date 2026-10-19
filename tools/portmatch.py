@@ -90,6 +90,70 @@ def deltas(values):
     return {b - a for a, b in zip(ordered, ordered[1:])}
 
 
+SPECIAL = {'C1': 'ctor', 'C2': 'ctor', 'C3': 'ctor', 'D0': 'dtor', 'D1': 'dtor', 'D2': 'dtor'}
+
+
+def mangled_path(symbol):
+    """`Class::method` out of an Itanium member mangling, with no external demangler."""
+    if symbol.startswith('_ZNK'):
+        index = 4
+    elif symbol.startswith('_ZN'):
+        index = 3
+    else:
+        return ''
+    parts = []
+    while index < len(symbol) and symbol[index].isdigit():
+        end = index
+        while end < len(symbol) and symbol[end].isdigit():
+            end += 1
+        size = int(symbol[index:end])
+        part = symbol[end:end + size]
+        if len(part) != size:
+            return ''
+        parts.append(part)
+        index = end + size
+    if not parts or index >= len(symbol):
+        return ''
+    code = symbol[index:index + 2]
+    if symbol[index] in 'CD' and index + 1 < len(symbol) and symbol[index + 1].isdigit():
+        if code not in SPECIAL:
+            return ''
+        parts.append(SPECIAL[code])
+    elif len(parts) < 2:
+        return ''
+    return '::'.join(parts)
+
+
+def qualified_names(index, out):
+    """functions.json names are unqualified (the Ghidra label keeps only the last
+    component), so `Class::method` queries miss.  Recover the full path from the
+    mangled symbol table when the build still has one."""
+    payload = load(index, 'symbols.json', None)
+    if not payload:
+        return 0
+    rows = payload.get('symbols') if isinstance(payload, dict) else payload
+    patched = 0
+    for symbol, value in (rows or {}).items():
+        if isinstance(value, dict):
+            value = value.get('address')
+        if isinstance(value, int):
+            address = value
+        elif isinstance(value, str):
+            try:
+                address = int(value, 16)
+            except ValueError:
+                continue
+        else:
+            continue
+        label = mangled_path(symbol)
+        key = f'0x{address:x}'
+        entry = out.get(key)
+        if entry and label and label not in entry['name']:
+            entry['name'] = label
+            patched += 1
+    return patched
+
+
 def prepare(index):
     rows = load(index, 'functions.json', None)
     if not rows:
@@ -110,6 +174,9 @@ def prepare(index):
             'calls': list(entry.get('calls') or []),
             'callers': list(entry.get('callers') or []),
         }
+    named = qualified_names(index, out)
+    if named and not os.environ.get('PORTMATCH_QUIET'):
+        print(f'[.] {index}: {named} names qualified from symbols.json')
     return out, derive_base(rows)
 
 
@@ -278,6 +345,9 @@ def resolve_source(source, token):
     if token.lower().startswith('0x'):
         return f'0x{to_int(token):x}'
     lowered = token.lower()
+    for key, entry in source.items():
+        if entry['name'].lower() == lowered:
+            return key
     best = None
     for key, entry in source.items():
         if lowered in entry['name'].lower():
