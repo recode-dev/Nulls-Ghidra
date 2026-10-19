@@ -22,6 +22,7 @@ MARKER_RE = re.compile(
 )
 CONV_RE = re.compile(r'\b__\w*call\b|\b__noreturn\b')
 CALL_RE = re.compile(r'(?:fcn|sym\.func)\.([0-9a-fA-F]+)')
+CALLEE_RE = re.compile(r'PTR_([A-Za-z_][A-Za-z0-9_$]*)')
 GENERIC_FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+?)\s+([A-Za-z_$][A-Za-z0-9_.$:~]*)\s*\(([^)]*)\)\s*\n?\s*\{'
 )
@@ -479,6 +480,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             'call_sites': {f'0x{t:x}': n for t, n in sorted(call_sites.items())},
             'callers': [],
             'unresolved_calls': [],
+            'callee_names': sorted(set(CALLEE_RE.findall(body))),
             'vcall_slots': vcalls,
             'field_offsets': sorted(reads | writes),
             'field_writes': sorted(writes),
