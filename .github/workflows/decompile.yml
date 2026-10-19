@@ -115,7 +115,8 @@ jobs:
             echo "cache image mismatch, dropping restored dump"
             rm -f decompiled.c index_data/imports.json index_data/symbols.json index_data/funcs.json structs.h index_data/bin_hash.txt
           fi
-          if [ "$code" = ready ] && [ -s index_data/imports.json ]; then sym=ready; fi
+          symbols=$(python3 -c "import json;print(len(json.load(open('index_data/imports.json'))))" 2>/dev/null || echo 0)
+          if [ "$code" = ready ] && [ "${symbols:-0}" -gt 0 ]; then sym=ready; fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "sym=$sym" >> "$GITHUB_OUTPUT"
           echo "cache dump=$code symbols=$sym"
