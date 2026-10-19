@@ -102,6 +102,7 @@ def prepare(index):
             'branches': entry.get('branches') or 0,
             'fields': set(entry.get('field_offsets') or []),
             'consts': set(entry.get('consts') or []),
+            'strings': set(entry.get('strings') or []),
             'calls': list(entry.get('calls') or []),
             'callers': list(entry.get('callers') or []),
         }
@@ -207,12 +208,16 @@ def score(src, dst, weights, df):
         'form': form,
         'chars': ratio(src['size'], dst['size']),
         'bytes': ratio(src['bytes'], dst['bytes']),
+        'strings': jac(src['strings'], dst['strings']),
     }
     parts['rare'] = sum(1 for value in src['consts'] & dst['consts'] if df.get(value, 999) <= 10)
-    weights = {'consts': 0.32, 'deltas': 0.18, 'fields': 0.12, 'form': 0.16, 'chars': 0.12, 'bytes': 0.10}
+    weights = {'consts': 0.22, 'strings': 0.26, 'deltas': 0.16, 'fields': 0.10, 'form': 0.14,
+               'chars': 0.06, 'bytes': 0.06}
     active = set()
-    if src['consts'] or dst['consts']:
+    if src['consts'] and dst['consts']:
         active.add('consts')
+    if src['strings'] and dst['strings']:
+        active.add('strings')
     if src['fields'] or dst['fields']:
         active.update(('deltas', 'fields'))
     if src['loops'] or src['branches'] or dst['loops'] or dst['branches']:
@@ -224,6 +229,9 @@ def score(src, dst, weights, df):
     total = sum(weights[k] * parts[k] for k in active) / sum(weights[k] for k in active) if active else 0.0
     if src['bytes'] and src['bytes'] == dst['bytes']:
         total += 0.05
+    shared = {text for text in src['strings'] & dst['strings'] if len(text) >= 8}
+    if shared:
+        total += min(0.12, 0.03 * len(shared))
     return max(0.0, min(1.0, total)), parts
 
 
