@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import bisect
 import json
 import os
 import struct
@@ -97,6 +98,7 @@ def symbol_vtables(data, symbols, base, width, fingerprints, code_range, section
     named = {name: int(value, 16) for name, value in (symbols.get('symbols') or {}).items()}
     types = {address: name for name, address in named.items() if name.startswith('_ZTI')}
     reader = '<I' if width == 4 else '<Q'
+    ztv = sorted(value for key, value in named.items() if key.startswith('_ZTV') and value > 0)
     out = {}
     for name, address in named.items():
         if not name.startswith('_ZTV') or address <= 0:
@@ -107,7 +109,9 @@ def symbol_vtables(data, symbols, base, width, fingerprints, code_range, section
         start = address + width * 2
         methods = []
         cursor = pos + width * 2
-        while cursor + width <= len(data) and len(methods) < MAX_SLOTS:
+        following = bisect.bisect_right(ztv, address)
+        limit = ztv[following] if following < len(ztv) else address + MAX_SLOTS * width
+        while cursor + width <= len(data) and address + (cursor - pos) < limit and len(methods) < MAX_SLOTS:
             value = struct.unpack_from(reader, data, cursor)[0]
             rva = value - base
             if width == 4 and rva & 1:

@@ -390,7 +390,15 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
     strings_xref = {}
     data_refs = {}
     line_starts = [m.start() for m in re.finditer('\n', text)]
-    call_names = {item['name']: item['address'] for item in found}
+    call_names = {}
+    for item in found:
+        label = item['name']
+        call_names.setdefault(label, item['address'])
+        short = label.split('::')[-1]
+        call_names.setdefault(short, item['address'])
+        if '::' not in label and not label.startswith('~'):
+            call_names.setdefault(f'{label}::{label}', item['address'])
+            call_names.setdefault(f'~{label}', item['address'])
     call_names.update(name_map or {})
 
     for entry in found:
@@ -400,6 +408,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
         address = entry['address']
         argstr = entry['args']
         body = entry['body']
+        marker_size = entry.get('size')
         rva = address - base if address >= base else address
 
         strings = []
@@ -455,7 +464,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
             'signature': f"{ret_type.strip()} ({', '.join(args)})" if args else f'{ret_type.strip()} ()',
             'args': len(args),
             'section': (lambda s: f"{s['seg']}.{s['sect']}" if s else None)(section_of(sections, address)),
-            'size_bytes': None,
+            'size_bytes': marker_size,
             'unwind': rva in unwind_starts,
             'size_chars': len(body),
             'lines': len(body.splitlines()),
@@ -505,7 +514,7 @@ def parse_code(code_path, base, image_size, max_field, sections, unwind_starts,
         ordered = sorted(offsets)
         for current, following in zip(ordered, ordered[1:]):
             key = f'0x{current:x}'
-            if key in functions:
+            if key in functions and not functions[key]['size_bytes']:
                 functions[key]['size_bytes'] = following - current
         last = f'0x{ordered[-1]:x}'
         if last in functions and name in ends and ends[name] > ordered[-1]:
