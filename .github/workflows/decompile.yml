@@ -171,6 +171,11 @@ jobs:
             --out index_data
 
       - run: |
+          python3 tools/rebind.py \
+            --bin "$BIN" \
+            --index_dir index_data
+
+      - run: |
           python3 tools/fields.py \
             --code decompiled.c \
             --out index_data/fields.json
