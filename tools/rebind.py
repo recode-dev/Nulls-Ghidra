@@ -33,6 +33,12 @@ def stub(word):
     return word in (0xE3A00000, 0xE1A00000, 0xE12FFF1E, 0xE320F000)
 
 
+def entry_keys(payload):
+    if not isinstance(payload, dict):
+        return []
+    return [key for key in payload if isinstance(key, str) and key.startswith('0x')]
+
+
 def main():
     args = parse_args()
     out = args.out or args.index_dir
@@ -55,6 +61,45 @@ def main():
             if section['addr'] <= address < section['addr'] + section['size'] and section['fileoff']:
                 return section['fileoff'] + address - section['addr']
         return None
+
+    shift = 0
+    symbols_path = os.path.join(out, 'symbols.json')
+    if os.path.exists(symbols_path):
+        values = [int(v, 16) for v in (json.load(open(symbols_path)).get('symbols') or {}).values()]
+        best = 0
+        for candidate in (0, 0x10000, 0x20000, 0x40000, -0x10000):
+            hits = sum(1 for value in values if f'0x{value + candidate:x}' in functions)
+            if hits > best:
+                best, shift = hits, candidate
+        if best < 32:
+            shift = 0
+    if shift:
+        def move(value):
+            return value - shift
+        renamed = {}
+        for key, entry in functions.items():
+            item = dict(entry)
+            item['offset'] = move(item['offset'])
+            item['address'] = move(item.get('address') or item['offset'] + shift)
+            if item.get('body_offset'):
+                item['body_offset'] = move(item['body_offset'])
+            item['calls'] = [f'0x{move(int(v, 16)):x}' for v in item.get('calls') or []]
+            item['callers'] = [f'0x{move(int(v, 16)):x}' for v in item.get('callers') or []]
+            item['unresolved_calls'] = [f'0x{move(int(v, 16)):x}' for v in item.get('unresolved_calls') or []]
+            item['data_refs'] = [f'0x{move(int(v, 16)):x}' for v in item.get('data_refs') or []]
+            item['call_sites'] = {f'0x{move(int(k, 16)):x}': v for k, v in (item.get('call_sites') or {}).items()}
+            renamed[f'0x{item["offset"]:x}'] = item
+        functions = renamed
+        for name in ('vtables.json', 'classes.json', 'ctors.json'):
+            target = os.path.join(out, name)
+            if not os.path.exists(target):
+                continue
+            payload = json.load(open(target))
+            text = json.dumps(payload)
+            for key in list(entry_keys(payload)):
+                text = text.replace(f'"{key}"', f'"0x{move(int(key, 16)):x}"')
+            json.dump(json.loads(text), open(target, 'w'), ensure_ascii=False)
+        print(f'[+] image shift -0x{shift:x}')
 
     moved = []
     for key, entry in list(functions.items()):
