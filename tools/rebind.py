@@ -43,8 +43,11 @@ def main():
     args = parse_args()
     out = args.out or args.index_dir
     os.makedirs(out, exist_ok=True)
+    same_dir = os.path.abspath(args.index_dir) == os.path.abspath(out)
     for name in os.listdir(args.index_dir):
         if name.endswith('.json'):
+            if same_dir:
+                continue
             shutil.copyfile(os.path.join(args.index_dir, name), os.path.join(out, name))
 
     path = os.path.join(out, 'functions.json')
