@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from binary import load_image
+from elf import EM_AARCH64
 
 MAX_BODY = 8192
 EDGE_INDEX_BONUS = 0.05
@@ -250,7 +251,7 @@ def binary_edges(path, start_va, length, index_base):
     blob, va = read_body(raw, sections, start_va, min(length, MAX_BODY))
     if not blob:
         return set(), [], binary_base
-    if machine & 0x1000000:
+    if machine & 0x1000000 or machine == EM_AARCH64:
         found = aarch64_targets(blob, va)
     else:
         found = arm_targets(blob, va) | thumb_targets(blob, va)

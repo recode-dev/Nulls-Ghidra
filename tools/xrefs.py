@@ -12,7 +12,7 @@ import struct
 import sys
 
 from binary import BadImage, CPU_TYPE_ARM64, load_image, is_elf
-from elf import elf_relocations
+from elf import EM_AARCH64, elf_relocations
 
 FUNC_RE = re.compile(
     r'\n([A-Za-z0-9_* ]+)\s+((?:fcn|sym\.func)\.([0-9a-fA-F]+))\s*\(([^)]*)\)\s*\n?\s*\{'
@@ -660,7 +660,7 @@ def main():
     with open(args.bin, 'rb') as f:
         raw = f.read()
     start, machine, base, sections = load_image(raw)
-    if machine not in (CPU_TYPE_ARM64, 40):
+    if machine not in (CPU_TYPE_ARM64, 40, EM_AARCH64):
         raise BadImage(f'machine 0x{machine:x} is not supported')
     arch = 'arm32' if machine == 40 else 'arm64'
     located = text_section(raw, sections)

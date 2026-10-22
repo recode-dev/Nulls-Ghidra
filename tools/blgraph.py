@@ -20,7 +20,7 @@ import struct
 import sys
 
 from binary import CPU_TYPE_ARM64, load_image
-from elf import elf_relocations
+from elf import EM_AARCH64, elf_relocations
 
 R_ARM_ABS32 = 2
 MAX_DEREF = 3
@@ -254,7 +254,7 @@ def main():
     with open(args.bin, 'rb') as handle:
         data = handle.read()
     start, machine, base, sections = load_image(data)
-    if machine == CPU_TYPE_ARM64:
+    if machine in (CPU_TYPE_ARM64, EM_AARCH64):
         arch, pointer_width = 'arm64', 8
         decode = decode_arm64
     elif machine == 40:

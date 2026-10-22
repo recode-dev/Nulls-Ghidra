@@ -21,6 +21,7 @@ import struct
 import sys
 
 from binary import CPU_TYPE_ARM64, load_image
+from elf import EM_AARCH64
 
 
 def parse_args():
@@ -108,7 +109,7 @@ def main():
     with open(args.bin, 'rb') as handle:
         data = handle.read()
     _, machine, base, sections = load_image(data)
-    width = 8 if machine == CPU_TYPE_ARM64 else 4
+    width = 8 if machine in (CPU_TYPE_ARM64, EM_AARCH64) else 4
     reader = Reader(data, sections, width)
 
     vtables = load_json(os.path.join(args.index, args.vtables), {})
